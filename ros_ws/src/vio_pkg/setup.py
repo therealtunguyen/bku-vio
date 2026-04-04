@@ -20,6 +20,7 @@ setup(
         "console_scripts": [
             "py_sub = vio_pkg.py_sub:main",
             "bag_reader = vio_pkg.bag_reader:main",
+            "vio_node = vio_pkg.vio_node:main",
         ],
     },
 )
