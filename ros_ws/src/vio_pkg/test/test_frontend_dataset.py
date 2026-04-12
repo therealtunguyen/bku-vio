@@ -160,6 +160,10 @@ def test_tracker_on_real_frames(frames):
         tracked, status = tracker.track(img0, img1, pts)
         rate = sum(status) / len(pts)
         track_rates.append(rate)
+        
+    if len(track_rates) == 0:
+        print(f"\n[ERROR] No valid frame pairs found in {BAG_PATH}")
+        sys.exit(1)
 
     avg_rate = sum(track_rates) / len(track_rates)
     info(f"Avg track survival rate over {len(track_rates)} frame pairs: {avg_rate:.1%}")
@@ -262,6 +266,9 @@ if __name__ == "__main__":
 
     print(f"\nReading up to {MAX_FRAMES} frames from {BAG_PATH} ...")
     frames = list(read_camera_frames(BAG_PATH, CAM_TOPIC, MAX_FRAMES))
+    if len(frames) == 0:
+        print(f"\n[ERROR] No frames found in {BAG_PATH}")
+        sys.exit(1)
     info(f"Loaded {len(frames)} frames — "
          f"resolution: {frames[0][1].shape[1]}x{frames[0][1].shape[0]}")
 

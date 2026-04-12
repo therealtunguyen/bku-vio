@@ -55,6 +55,7 @@ class HarrisDetector(IFeatureDetector):
             qualityLevel=self._config.quality_level,
             minDistance=self._config.min_distance,
             mask=mask,
+            blockSize=self._config.harris_block_size,
             useHarrisDetector=True,
             k=self._config.harris_k,
         )

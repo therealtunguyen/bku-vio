@@ -250,3 +250,31 @@ Each green dot is one `FeatureTrack` in `active_tracks` — it marks the latest 
 - `frame_00` — first frame, detect only (no tracking yet). Should show the most spatially uniform distribution.
 - `frame_01` — first real tracking pass. Dots may shift slightly following camera motion. No RANSAC has run yet.
 - `frame_02` — RANSAC has now run once. Expect slightly fewer dots as geometric outliers are dropped — this is normal and correct behaviour.
+
+---
+
+## Known Issues & Design Decisions
+
+### IMU Buffer Pruning (`vio_node.py`)
+
+**Problem statement**
+
+After extracting IMU samples for a frame, the buffer must be pruned to prevent unbounded memory growth. A naive implementation might keep a fixed-duration tail (e.g. `timestamp > image_time - 0.1`) on the assumption that "some overlap is needed for the next window." This is wrong for two reasons:
+
+1. **Dead data**: the slice `(image_time - 0.1, image_time]` was already consumed by the current frame's integration window. Keeping it wastes memory with no benefit.
+2. **Misleading comment**: "keep a tail for the next window" implies those past samples will be re-used, but the next window needs future samples (timestamps > `image_time`) — not past ones.
+
+**Why there is no data-loss risk from a slow camera**
+
+Pruning only runs at frame-processing time. At that moment, IMU samples for the *next* frame haven't arrived yet (they have timestamps in the future). So regardless of camera frame rate — even 1 Hz — future IMU data can never be pruned by the current frame's cleanup step.
+
+**Current fix**
+
+```python
+# Discard all consumed IMU data. Samples with timestamp >
+# image_time have not arrived yet or just arrived and will
+# be picked up by the next integration window.
+self.imu_buffer = [m for m in self.imu_buffer if m.timestamp > image_time]
+```
+
+Prune exactly at `image_time`: keep only unconsumed future samples, discard everything that has already been extracted.

@@ -198,8 +198,8 @@ class FeatureManager:
         *features_per_cell* existing features are marked 255 (detect here).
         """
         h, w = image_shape[:2]
-        cell_h = h // self._config.grid_rows
-        cell_w = w // self._config.grid_cols
+        cell_h = max(1, h // self._config.grid_rows)
+        cell_w = max(1, w // self._config.grid_cols)
         features_per_cell = max(
             1,
             self._config.max_features

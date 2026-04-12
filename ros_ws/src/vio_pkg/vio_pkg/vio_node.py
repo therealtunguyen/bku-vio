@@ -98,10 +98,12 @@ class VIOSystemNode(Node):
                     m for m in self.imu_buffer
                     if self.last_image_time < m.timestamp <= image_time
                 ]
-                # Prune stale IMU data (keep a small tail for the next window).
+                # Discard all consumed IMU data. Samples with timestamp >
+                # image_time have not arrived yet or just arrived and will
+                # be picked up by the next integration window.
                 self.imu_buffer = [
                     m for m in self.imu_buffer
-                    if m.timestamp > image_time - 0.1
+                    if m.timestamp > image_time
                 ]
 
             # 3. IMU Prediction (propagate state forward — backend stub for now).
