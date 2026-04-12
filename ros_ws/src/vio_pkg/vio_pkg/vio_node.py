@@ -8,9 +8,10 @@ import numpy as np
 import threading
 import queue
 
-from .utils.common import ImuData
+from .utils.common import CameraPose, ImuData
+from .frontend.interfaces import FrontendConfig
 from .frontend.feature_manager import FeatureManager
-from .frontend.detectors import HarrisDetector
+from .frontend.detectors import ShiTomasiDetector
 from .frontend.trackers import KLTTracker
 from .backend.state_server import StateServer
 from .backend.propagator import ImuPropagator
@@ -34,9 +35,10 @@ class VIOSystemNode(Node):
         self.last_image_time = -1.0
         
         # Modules
-        self.detector = HarrisDetector()
-        self.tracker = KLTTracker()
-        self.frontend = FeatureManager(self.detector, self.tracker)
+        self.frontend_config = FrontendConfig()
+        self.detector = ShiTomasiDetector(self.frontend_config)
+        self.tracker = KLTTracker(self.frontend_config)
+        self.frontend = FeatureManager(self.detector, self.tracker, self.frontend_config)
         
         self.state_server = StateServer()
         self.imu_propagator = ImuPropagator(self.state_server)
@@ -84,17 +86,51 @@ class VIOSystemNode(Node):
         Thread 2: Pops images, correlates IMU data, and runs Computer Vision tracking.
         """
         while rclpy.ok():
-            # TODO: Pop image from self.image_queue (with timeout)
-            # TODO: Grab synchronized IMU measurements between last_image_time and current from self.imu_buffer
-            
-            # --- Phase 3: IMU Prediction ---
-            # TODO: Call self.imu_propagator.propagate(imu_measurements)
-            
-            # --- Phase 2: Feature Tracking ---
-            # TODO: Call mature_features = self.frontend.process_image(image_time, image, current_cam_pose)
-            
-            # TODO: Push mature_features into self.measurement_queue
-            pass
+            # 1. Block until a new image arrives (1 s timeout to allow clean shutdown).
+            try:
+                image_time, image = self.image_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            # 2. Extract IMU measurements between the previous and current frame.
+            with self.imu_lock:
+                imu_measurements = [
+                    m for m in self.imu_buffer
+                    if self.last_image_time < m.timestamp <= image_time
+                ]
+                # Discard all consumed IMU data. Samples with timestamp >
+                # image_time have not arrived yet or just arrived and will
+                # be picked up by the next integration window.
+                self.imu_buffer = [
+                    m for m in self.imu_buffer
+                    if m.timestamp > image_time
+                ]
+
+            # 3. IMU Prediction (propagate state forward — backend stub for now).
+            if imu_measurements:
+                self.imu_propagator.propagate(imu_measurements)
+
+            # 4. Build current camera pose from propagated state.
+            state = self.state_server.state
+            current_cam_pose = CameraPose(
+                timestamp=image_time,
+                position=state.position.copy(),
+                quaternion=state.quaternion.copy(),
+            )
+
+            # 5. Feature Tracking.
+            mature_features = self.frontend.process_image(
+                image_time, image, current_cam_pose
+            )
+
+            # 6. Forward mature features to the backend worker.
+            if mature_features:
+                try:
+                    self.measurement_queue.put_nowait((image_time, mature_features))
+                except queue.Full:
+                    self.get_logger().warn("Measurement queue full. Dropped features.")
+
+            self.last_image_time = image_time
 
     def backend_worker(self):
         """
