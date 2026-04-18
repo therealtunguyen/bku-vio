@@ -97,7 +97,28 @@ ros2 topic pub /imu0 sensor_msgs/msg/Imu "{
   angular_velocity: {x: 0.0, y: 0.0, z: 0.0}
 }" --once
 ```
+## 8. Chạy toàn bộ hệ thống (Quick Start)
 
+Khởi động Docker container:
+
+```bash
+docker run -p 6080:80 \
+  --name vio_container \
+  --security-opt seccomp=unconfined \
+  --shm-size=512m \
+  -v /Users/twang/HCMUT/bku-vio/ros_ws:/home/ubuntu/ros_ws \
+  -v /Users/twang/HCMUT/bku-vio/dataset:/home/ubuntu/dataset \
+  ghcr.io/tiryoh/ros2-desktop-vnc:humble
+```
+
+Mở terminal trong VNC, build package và chạy launch file:
+
+```bash
+cd ~/ros_ws
+colcon build --packages-select vio_pkg
+source install/setup.bash
+ros2 launch vio_pkg vio_system.launch.py
+```
 ## Cấu trúc thư mục
 
 ```
