@@ -116,3 +116,5 @@ bku-vio/
 │               └── bag_reader.py    # Đọc IMU + Camera + Vicon
 └── REAME.md
 ```
+# MISC NOTE
+pip install "numpy<2"
