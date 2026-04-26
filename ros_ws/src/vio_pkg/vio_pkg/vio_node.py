@@ -7,6 +7,7 @@ from visualization_msgs.msg import Marker
 from tf2_ros import TransformBroadcaster
 from cv_bridge import CvBridge
 from builtin_interfaces.msg import Time
+import csv
 import struct
 import numpy as np
 import threading
@@ -66,8 +67,14 @@ class VIOSystemNode(Node):
         self.camera_marker_pub = self.create_publisher(Marker, '/vio/camera_pose', 10)
         self.debug_img_pub = self.create_publisher(Image, '/vio/camera/image_raw', 10)
         self.cam_info_pub = self.create_publisher(CameraInfo, '/vio/camera/camera_info', 10)
+        self.gt_path_pub = self.create_publisher(Path, '/vio/gt_path', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.path_msg = Path()
+
+        # Load ground truth from EuRoC CSV and publish once on a latched-style timer
+        gt_csv = '/home/ubuntu/VIO/dataset/V1_01_easy/mav0/state_groundtruth_estimate0/data.csv'
+        self.gt_path_msg = self._load_gt_path(gt_csv)
+        self._gt_timer = self.create_timer(1.0, self._publish_gt_path)
         
         # Start Threads
         self.frontend_thread = threading.Thread(target=self.frontend_worker, daemon=True)
@@ -131,6 +138,38 @@ class VIOSystemNode(Node):
             self.image_queue.put_nowait((curr_time, cv_img))
         except queue.Full:
             self.get_logger().warn("Image queue full. Dropped frame.")
+
+    def _load_gt_path(self, csv_path: str) -> Path:
+        path = Path()
+        path.header.frame_id = 'world'
+        try:
+            with open(csv_path, 'r') as f:
+                reader = csv.reader(f)
+                next(reader)  # skip header
+                for row in reader:
+                    ts_ns = int(row[0])
+                    sec = ts_ns // 1_000_000_000
+                    nanosec = ts_ns % 1_000_000_000
+                    ps = PoseStamped()
+                    ps.header.frame_id = 'world'
+                    ps.header.stamp.sec = sec
+                    ps.header.stamp.nanosec = nanosec
+                    ps.pose.position.x = float(row[1])
+                    ps.pose.position.y = float(row[2])
+                    ps.pose.position.z = float(row[3])
+                    ps.pose.orientation.w = float(row[4])
+                    ps.pose.orientation.x = float(row[5])
+                    ps.pose.orientation.y = float(row[6])
+                    ps.pose.orientation.z = float(row[7])
+                    path.poses.append(ps)
+            self.get_logger().info(f"Loaded {len(path.poses)} GT poses from {csv_path}")
+        except Exception as e:
+            self.get_logger().warn(f"Could not load GT CSV: {e}")
+        return path
+
+    def _publish_gt_path(self):
+        self.gt_path_msg.header.stamp = self.get_clock().now().to_msg()
+        self.gt_path_pub.publish(self.gt_path_msg)
 
     def frontend_worker(self):
         """
