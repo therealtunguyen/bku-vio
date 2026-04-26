@@ -20,24 +20,16 @@ Mount `ros_ws` vào container để code được đồng bộ realtime:
 docker run -p 6080:80 \
   --security-opt seccomp=unconfined \
   --shm-size=512m \
-  -v <đường_dẫn_tới_ros_ws>:/home/ubuntu/ros_ws \
+  -v <path/to/ros_ws>:/home/ubuntu/VIO/ros_ws \
+  -v <path/to/dataset>:/home/ubuntu/VIO/dataset \
   ghcr.io/tiryoh/ros2-desktop-vnc:humble
 ```
 
-> ⚠️ Thay `<đường_dẫn_tới_ros_ws>` bằng **absolute path** tới thư mục `ros_ws` trên máy bạn.
-> Ví dụ: `-v /Users/twang/HCMUT/bku-vio/ros_ws:/home/ubuntu/ros_ws`
+> ⚠️ Thay `<path/to/ros_ws>` và `<path/to/dataset>` bằng **absolute path** trên máy bạn.
+> Ví dụ (macOS): `-v /Users/yourname/bku-vio/ros_ws:/home/ubuntu/VIO/ros_ws`
+> Ví dụ (Linux/WSL): `-v /home/yourname/bku-vio/ros_ws:/home/ubuntu/VIO/ros_ws`
 
 Truy cập VNC: **http://localhost:6080**
-
-> **Tip:** Nếu cần mount thêm dataset vào container:
-> ```bash
-> docker run -p 6080:80 \
->   --security-opt seccomp=unconfined \
->   --shm-size=512m \
->   -v <đường_dẫn_tới_ros_ws>:/home/ubuntu/ros_ws \
->   -v <đường_dẫn_tới_dataset>:/home/ubuntu/dataset \
->   ghcr.io/tiryoh/ros2-desktop-vnc:humble
-> ```
 
 ## 3. Build package (trong container)
 
@@ -99,25 +91,29 @@ ros2 topic pub /imu0 sensor_msgs/msg/Imu "{
 ```
 ## 8. Chạy toàn bộ hệ thống (Quick Start)
 
-Khởi động Docker container:
+Khởi động Docker container (thay `<path/to/ros_ws>` và `<path/to/dataset>` bằng đường dẫn thực trên máy bạn):
 
 ```bash
 docker run -p 6080:80 \
   --name vio_container \
   --security-opt seccomp=unconfined \
   --shm-size=512m \
-  -v /Users/twang/HCMUT/bku-vio/ros_ws:/home/ubuntu/ros_ws \
-  -v /Users/twang/HCMUT/bku-vio/dataset:/home/ubuntu/dataset \
+  -v <path/to/ros_ws>:/home/ubuntu/VIO/ros_ws \
+  -v <path/to/dataset>:/home/ubuntu/VIO/dataset \
   ghcr.io/tiryoh/ros2-desktop-vnc:humble
 ```
 
 Mở terminal trong VNC, build package và chạy launch file:
 
 ```bash
-cd ~/ros_ws
+cd ~/VIO/ros_ws
 colcon build --packages-select vio_pkg
 source install/setup.bash
+
+# Dataset mặc định tại /home/ubuntu/VIO/dataset — override nếu cần:
 ros2 launch vio_pkg vio_system.launch.py
+# hoặc chỉ định dataset_dir cụ thể:
+ros2 launch vio_pkg vio_system.launch.py dataset_dir:=/home/ubuntu/VIO/dataset
 ```
 ## Cấu trúc thư mục
 

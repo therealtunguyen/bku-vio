@@ -72,7 +72,8 @@ class VIOSystemNode(Node):
         self.path_msg = Path()
 
         # Load ground truth from EuRoC CSV and publish once on a latched-style timer
-        gt_csv = '/home/ubuntu/VIO/dataset/V1_01_easy/mav0/state_groundtruth_estimate0/data.csv'
+        self.declare_parameter('gt_csv_path', '')
+        gt_csv = self.get_parameter('gt_csv_path').get_parameter_value().string_value
         self.gt_path_msg = self._load_gt_path(gt_csv)
         self._gt_timer = self.create_timer(1.0, self._publish_gt_path)
         
