@@ -73,7 +73,18 @@ class VIOSystemNode(Node):
 
         # Load ground truth from EuRoC CSV and publish once on a latched-style timer
         self.declare_parameter('gt_csv_path', '')
+        self.declare_parameter('imu_init_sample_count', 200)
         gt_csv = self.get_parameter('gt_csv_path').get_parameter_value().string_value
+        self.imu_init_sample_count = (
+            self.get_parameter('imu_init_sample_count')
+            .get_parameter_value()
+            .integer_value
+        )
+        if self.imu_init_sample_count < 1:
+            self.get_logger().warn(
+                "imu_init_sample_count must be >= 1; falling back to 200"
+            )
+            self.imu_init_sample_count = 200
         self.gt_path_msg = self._load_gt_path(gt_csv)
         self._gt_timer = self.create_timer(1.0, self._publish_gt_path)
         
@@ -102,7 +113,7 @@ class VIOSystemNode(Node):
             # Static IMU Initialization
             if not self.gravity_aligned:
                 self.initial_imu_buffer.append(imu_data)
-                if len(self.initial_imu_buffer) >= 20: # Use ~20 messages
+                if len(self.initial_imu_buffer) >= self.imu_init_sample_count:
                     a_avg = np.mean([m.accel for m in self.initial_imu_buffer], axis=0)
                     # Find R_WI that rotates a_avg/norm to [0, 0, 1]
                     z_axis = a_avg / np.linalg.norm(a_avg)
@@ -122,8 +133,20 @@ class VIOSystemNode(Node):
                         self.state_server.state.quaternion = q_init
                         self.state_server.state.timestamp = self.initial_imu_buffer[-1].timestamp
                         
+                    init_start_time = self.initial_imu_buffer[0].timestamp
+                    init_end_time = self.initial_imu_buffer[-1].timestamp
+                    init_duration = init_end_time - init_start_time
+                    self.imu_buffer = [
+                        m for m in self.imu_buffer
+                        if m.timestamp > init_end_time
+                    ]
                     self.gravity_aligned = True
-                    self.get_logger().info(f"Gravity Aligned! Initial Pitch/Roll solved. a_avg: {a_avg}")
+                    self.get_logger().info(
+                        "Gravity Aligned! Initial Pitch/Roll solved. "
+                        f"samples: {len(self.initial_imu_buffer)}, "
+                        f"duration: {init_duration:.3f}s, "
+                        f"a_avg: {a_avg}"
+                    )
                     
     def image_callback(self, msg: Image):
         if not self.gravity_aligned:

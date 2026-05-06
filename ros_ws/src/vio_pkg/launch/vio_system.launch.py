@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import ExecuteProcess, DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from ament_index_python.packages import get_package_share_directory
@@ -14,8 +15,14 @@ def generate_launch_description():
         default_value=default_dataset_dir,
         description="Absolute path to the dataset root (contains V1_01_easy/)",
     )
+    imu_init_sample_count_arg = DeclareLaunchArgument(
+        "imu_init_sample_count",
+        default_value="200",
+        description="Number of startup IMU samples to average for gravity/bias initialization.",
+    )
 
     dataset_dir = LaunchConfiguration("dataset_dir")
+    imu_init_sample_count = LaunchConfiguration("imu_init_sample_count")
 
     bag_path = PathJoinSubstitution([dataset_dir, "V1_01_easy"])
     gt_csv_path = PathJoinSubstitution(
@@ -35,6 +42,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             dataset_dir_arg,
+            imu_init_sample_count_arg,
             # 1. Rosbag player
             ExecuteProcess(
                 cmd=["ros2", "bag", "play", bag_path, "--clock"], output="screen"
@@ -45,7 +53,16 @@ def generate_launch_description():
                 executable="vio_system_node",
                 name="vio_system_node",
                 output="screen",
-                parameters=[{"use_sim_time": True, "gt_csv_path": gt_csv_path}],
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "gt_csv_path": gt_csv_path,
+                        "imu_init_sample_count": ParameterValue(
+                            imu_init_sample_count,
+                            value_type=int,
+                        ),
+                    }
+                ],
             ),
             # 3. RViz with pre-configured displays
             Node(
