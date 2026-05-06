@@ -11,7 +11,7 @@ Requires ROS 2 Humble — run INSIDE the container:
         python3 src/vio_pkg/test/test_frontend_dataset.py
     "
 
-The bag must be at /home/ubuntu/VIO/dataset/.
+The bag must be at /home/ubuntu/VIO/dataset/V1_01_easy/.
 """
 
 import sys
@@ -43,7 +43,7 @@ try:
 except ImportError:
     HAS_ROS = False
 
-BAG_PATH = "/home/ubuntu/VIO/dataset"
+BAG_PATH = "/home/ubuntu/VIO/dataset/V1_01_easy"
 CAM_TOPIC = "/cam0/image_raw"
 MAX_FRAMES = 50   # number of frames to test with (full bag has 2912)
 
