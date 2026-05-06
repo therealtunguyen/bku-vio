@@ -85,8 +85,8 @@ class ImuPropagator:
             F = np.zeros((15, 15))
             # pos (0:3), vel (3:6), ori (6:9), gyro_bias (9:12), accel_bias (12:15)
             F[0:3, 3:6] = np.eye(3)
-            # dv_dot wrt ori
-            F[3:6, 6:9] = R @ skew_symmetric(a_hat)
+            # dv_dot wrt ori (Mourikis 2007, eq. 34 — negative sign)
+            F[3:6, 6:9] = -R @ skew_symmetric(a_hat)
             # dv_dot wrt accel_bias
             F[3:6, 12:15] = -R
             # dori_dot wrt ori

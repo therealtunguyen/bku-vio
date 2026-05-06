@@ -1,9 +1,13 @@
 import numpy as np
 from typing import List
 import scipy.linalg as linalg
+from scipy.stats import chi2
 from ..utils.common import FeatureTrack
 from .state_server import StateServer
 from .math_utils import quaternion_to_matrix, quaternion_multiply, normalize_quaternion, skew_symmetric
+
+# Precompute chi-squared thresholds (95th percentile) indexed by DOF
+_CHI2_THRESH = {dof: chi2.ppf(0.95, dof) for dof in range(2, 201)}
 
 class MSCKFUpdater:
     def __init__(self, state_server: StateServer):
@@ -40,8 +44,9 @@ class MSCKFUpdater:
 
             H_xo, r_o = self.null_space_projection(H_x, H_f, r)
             if H_xo is not None and r_o is not None:
-                H_stacked.append(H_xo)
-                r_stacked.append(r_o)
+                if self._gating_test(H_xo, r_o):
+                    H_stacked.append(H_xo)
+                    r_stacked.append(r_o)
 
         if not H_stacked:
             return
@@ -147,6 +152,21 @@ class MSCKFUpdater:
             H_x[2*i : 2*i+2, state_idx : state_idx+6] = H_x_i
 
         return H_x, H_f, r, True
+
+    def _gating_test(self, H_xo: np.ndarray, r_o: np.ndarray) -> bool:
+        """
+        Chi-squared gating test (KumarRobotics msckf_vio gatingTest).
+        Rejects features whose projected residual is statistically inconsistent
+        with the current state covariance — catches bad triangulations and outliers.
+        """
+        dof = r_o.shape[0]
+        if dof < 2:
+            return False
+        P = self.state_server.covariance
+        S = H_xo @ P @ H_xo.T + np.eye(dof) * self.measurement_noise
+        gamma = r_o @ np.linalg.solve(S, r_o)
+        thresh = _CHI2_THRESH.get(dof, chi2.ppf(0.95, dof))
+        return gamma < thresh
 
     def null_space_projection(self, H_x, H_f, r):
         """
