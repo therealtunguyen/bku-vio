@@ -1,5 +1,6 @@
 import numpy as np
 from typing import List
+import cv2
 import scipy.linalg as linalg
 from scipy.stats import chi2
 from ..utils.common import FeatureTrack
@@ -28,6 +29,37 @@ class MSCKFUpdater:
         self.fy = 457.296
         self.cx = 367.215
         self.cy = 248.375
+        self.camera_matrix = np.array([
+            [self.fx, 0.0, self.cx],
+            [0.0, self.fy, self.cy],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+        self.distortion_coefficients = np.array([
+            -0.28340811,
+            0.07395907,
+            0.00019359,
+            1.76187114e-05,
+        ], dtype=np.float64)
+
+    def _normalize_observation(self, obs: np.ndarray) -> np.ndarray:
+        """
+        Convert a raw EuRoC cam0 pixel to an undistorted normalized bearing.
+        """
+        return self._normalize_observations([obs])[0]
+
+    def _normalize_observations(self, observations) -> np.ndarray:
+        """
+        Convert raw EuRoC cam0 pixels to undistorted normalized bearings.
+        """
+        if len(observations) == 0:
+            return np.empty((0, 2), dtype=np.float64)
+        point = np.asarray(observations, dtype=np.float64).reshape(-1, 1, 2)
+        undistorted = cv2.undistortPoints(
+            point,
+            self.camera_matrix,
+            self.distortion_coefficients,
+        )
+        return undistorted.reshape(-1, 2)
 
     def _get_clone_sequence(self, feature: FeatureTrack):
         """
@@ -127,8 +159,9 @@ class MSCKFUpdater:
         clone_sequence = self._get_clone_sequence(feature)
         if clone_sequence is None:
             return None
+        normalized_observations = self._normalize_observations(feature.observations)
 
-        for obs, (_, cam_pose) in zip(feature.observations, clone_sequence):
+        for obs_norm, (_, cam_pose) in zip(normalized_observations, clone_sequence):
             R_wc = quaternion_to_matrix(cam_pose.quaternion)
             p_c = cam_pose.position
             # Projection matrix components
@@ -140,9 +173,8 @@ class MSCKFUpdater:
             P2 = P_matrix[1, :]
             P3 = P_matrix[2, :]
             
-            # Convert pixel to normalized coordinate
-            x = (obs[0] - self.cx) / self.fx
-            y = (obs[1] - self.cy) / self.fy
+            # Convert raw distorted pixel to undistorted normalized coordinate.
+            x, y = obs_norm
             
             A.append(x * P3 - P1)
             A.append(y * P3 - P2)
@@ -158,14 +190,14 @@ class MSCKFUpdater:
             # Reject poorly triangulated points via mean reprojection error
             total_err = 0.0
             n_obs = len(feature.observations)
-            for obs, (_, cam_pose) in zip(feature.observations, clone_sequence):
+            for obs_norm, (_, cam_pose) in zip(normalized_observations, clone_sequence):
                 R_cw = quaternion_to_matrix(cam_pose.quaternion).T
                 p_c = R_cw @ (p_w - cam_pose.position)
                 if p_c[2] < 1e-3:
                     return None
-                px = self.fx * p_c[0] / p_c[2] + self.cx
-                py = self.fy * p_c[1] / p_c[2] + self.cy
-                total_err += np.sqrt((px - obs[0])**2 + (py - obs[1])**2)
+                pred_norm = np.array([p_c[0] / p_c[2], p_c[1] / p_c[2]])
+                pixel_err = np.linalg.norm(pred_norm - obs_norm) * 0.5 * (self.fx + self.fy)
+                total_err += pixel_err
             if total_err / n_obs > 5.0:
                 return None
 
@@ -187,8 +219,9 @@ class MSCKFUpdater:
         clone_sequence = self._get_clone_sequence(feature)
         if clone_sequence is None:
             return None, None, None, False
+        normalized_observations = self._normalize_observations(feature.observations)
 
-        for i, (obs, (clone_idx, cam_pose)) in enumerate(zip(feature.observations, clone_sequence)):
+        for i, (obs_norm, (clone_idx, cam_pose)) in enumerate(zip(normalized_observations, clone_sequence)):
             state_idx = 15 + 6 * clone_idx
 
             R_wc = quaternion_to_matrix(cam_pose.quaternion)
@@ -206,10 +239,6 @@ class MSCKFUpdater:
 
             # Reprojection Error (normalized coordinate)
             # The observation from frontend is taking in raw pixels, so we normalize it here!
-            obs_norm = np.array([
-                (obs[0] - self.cx) / self.fx,
-                (obs[1] - self.cy) / self.fy
-            ])
             r[2*i : 2*i+2] = obs_norm - z_hat
 
             # Jacobian of projection w.r.t 3D feature in Camera Frame
