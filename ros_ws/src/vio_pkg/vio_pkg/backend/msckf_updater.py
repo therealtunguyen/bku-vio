@@ -13,6 +13,15 @@ class MSCKFUpdater:
     def __init__(self, state_server: StateServer):
         self.state_server = state_server
         self.measurement_noise = 1e-4
+        self.last_update_stats = {}
+        self.last_batch_rejected = False
+
+        # Runtime safety rails. These are intentionally conservative because a
+        # single bad visual batch can destroy the inertial state.
+        self.max_batch_dx_pos_norm = 0.5
+        self.max_batch_dx_vel_norm = 1.0
+        self.max_batch_dx_bias_norm = 0.25
+        self.max_update_condition_number = 1e12
 
         # Euroc MAV dataset cam0 intrinsics (approx baseline)
         self.fx = 458.654
@@ -20,26 +29,69 @@ class MSCKFUpdater:
         self.cx = 367.215
         self.cy = 248.375
 
+    def _get_clone_sequence(self, feature: FeatureTrack):
+        """
+        Resolve a feature's observation timestamps to the current clone window.
+        FeatureTrack.camera_states are frontend snapshots; the EKF update must
+        use the authoritative clone poses stored in StateServer.
+        """
+        if len(feature.observations) != len(feature.camera_states):
+            return None
+
+        clone_by_timestamp = {
+            clone.timestamp: (idx, clone)
+            for idx, clone in enumerate(self.state_server.state.clone_poses)
+        }
+
+        clone_sequence = []
+        for cam_pose in feature.camera_states:
+            clone_entry = clone_by_timestamp.get(cam_pose.timestamp)
+            if clone_entry is None:
+                return None
+            clone_sequence.append(clone_entry)
+        return clone_sequence
+
     def process_mature_features(self, mature_features: List[FeatureTrack]):
         """
         Process the features that have been successfully tracked and are now ready.
         """
+        stats = {
+            "mature": len(mature_features),
+            "too_short": 0,
+            "triangulated": 0,
+            "triangulation_failed": 0,
+            "invalid_jacobian": 0,
+            "gated_out": 0,
+            "accepted": 0,
+            "rows": 0,
+            "dx_norm": 0.0,
+            "dx_pos_norm": 0.0,
+            "dx_vel_norm": 0.0,
+            "dx_accel_bias_norm": 0.0,
+            "batch_rejected": 0,
+        }
+
         if not mature_features:
+            self.last_update_stats = stats
             return
 
         H_stacked = []
         r_stacked = []
 
         for feature in mature_features:
-            if len(feature.camera_states) < 3:
+            if len(feature.observations) < 3:
+                stats["too_short"] += 1
                 continue
 
             feature_3d = self.triangulate_feature(feature)
             if feature_3d is None:
+                stats["triangulation_failed"] += 1
                 continue
+            stats["triangulated"] += 1
 
             H_x, H_f, r, valid = self.calc_residuals_and_jacobian(feature_3d, feature)
             if not valid:
+                stats["invalid_jacobian"] += 1
                 continue
 
             H_xo, r_o = self.null_space_projection(H_x, H_f, r)
@@ -47,21 +99,36 @@ class MSCKFUpdater:
                 if self._gating_test(H_xo, r_o):
                     H_stacked.append(H_xo)
                     r_stacked.append(r_o)
+                    stats["accepted"] += 1
+                    stats["rows"] += H_xo.shape[0]
+                else:
+                    stats["gated_out"] += 1
 
         if not H_stacked:
+            self.last_update_stats = stats
             return
 
         H_all = np.vstack(H_stacked)
         r_all = np.concatenate(r_stacked)
 
-        self.measurement_update(H_all, r_all)
+        dx = self.measurement_update(H_all, r_all)
+        stats["dx_norm"] = float(np.linalg.norm(dx))
+        stats["dx_pos_norm"] = float(np.linalg.norm(dx[0:3]))
+        stats["dx_vel_norm"] = float(np.linalg.norm(dx[3:6]))
+        stats["dx_accel_bias_norm"] = float(np.linalg.norm(dx[12:15]))
+        stats["batch_rejected"] = int(self.last_batch_rejected)
+        self.last_update_stats = stats
 
     def triangulate_feature(self, feature: FeatureTrack):
         """
         Estimate initial 3D position of the feature using DLT.
         """
         A = []
-        for obs, cam_pose in zip(feature.observations, feature.camera_states):
+        clone_sequence = self._get_clone_sequence(feature)
+        if clone_sequence is None:
+            return None
+
+        for obs, (_, cam_pose) in zip(feature.observations, clone_sequence):
             R_wc = quaternion_to_matrix(cam_pose.quaternion)
             p_c = cam_pose.position
             # Projection matrix components
@@ -87,6 +154,21 @@ class MSCKFUpdater:
             if abs(V[-1, 3]) < 1e-6:
                 return None
             p_w = V[-1, :3] / V[-1, 3] # Homogeneous to 3D
+
+            # Reject poorly triangulated points via mean reprojection error
+            total_err = 0.0
+            n_obs = len(feature.observations)
+            for obs, (_, cam_pose) in zip(feature.observations, clone_sequence):
+                R_cw = quaternion_to_matrix(cam_pose.quaternion).T
+                p_c = R_cw @ (p_w - cam_pose.position)
+                if p_c[2] < 1e-3:
+                    return None
+                px = self.fx * p_c[0] / p_c[2] + self.cx
+                py = self.fy * p_c[1] / p_c[2] + self.cy
+                total_err += np.sqrt((px - obs[0])**2 + (py - obs[1])**2)
+            if total_err / n_obs > 5.0:
+                return None
+
             return p_w
         except np.linalg.LinAlgError:
             return None
@@ -102,14 +184,11 @@ class MSCKFUpdater:
         H_f = np.zeros((2 * n_obs, 3))
         r = np.zeros(2 * n_obs)
 
-        # Mapping clone timestamps to its position in the state
-        clone_timestamps = [c.timestamp for c in self.state_server.state.clone_poses]
+        clone_sequence = self._get_clone_sequence(feature)
+        if clone_sequence is None:
+            return None, None, None, False
 
-        for i, (obs, cam_pose) in enumerate(zip(feature.observations, feature.camera_states)):
-            if cam_pose.timestamp not in clone_timestamps:
-                return None, None, None, False
-                
-            clone_idx = clone_timestamps.index(cam_pose.timestamp)
+        for i, (obs, (clone_idx, cam_pose)) in enumerate(zip(feature.observations, clone_sequence)):
             state_idx = 15 + 6 * clone_idx
 
             R_wc = quaternion_to_matrix(cam_pose.quaternion)
@@ -145,7 +224,7 @@ class MSCKFUpdater:
 
             # Jacobian w.r.t camera state
             # state var = [delta_theta_c, delta_p_c]
-            J_theta = -skew_symmetric(f_c)
+            J_theta = skew_symmetric(f_c)
             J_p = -R_wc.T
             
             H_x_i = J_proj @ np.hstack([J_theta, J_p])
@@ -188,6 +267,8 @@ class MSCKFUpdater:
         """
         Standard Kalman Filter update to correct State and Covariance.
         """
+        self.last_batch_rejected = False
+
         # Compress H and r using Thin QR to speed up matrix inversion
         if H_all.shape[0] > H_all.shape[1]:
             Q, R = linalg.qr(H_all, mode='economic')
@@ -202,16 +283,37 @@ class MSCKFUpdater:
         # Kalman Gain
         R_n = np.eye(H_th.shape[0]) * self.measurement_noise
         S = H_th @ P @ H_th.T + R_n
+        if not np.all(np.isfinite(S)) or np.linalg.cond(S) > self.max_update_condition_number:
+            self.last_batch_rejected = True
+            return np.zeros(P.shape[0])
+
         K = P @ H_th.T @ linalg.inv(S)
 
         # Update State
         dx = K @ r_th
+        if self._is_unreasonable_update(dx):
+            self.last_batch_rejected = True
+            return dx
+
         self.apply_state_update(dx)
 
-        # Update Covariance
-        self.state_server.covariance = (np.eye(P.shape[0]) - K @ H_th) @ P
+        # Update Covariance using Joseph form for better numerical stability.
+        I_KH = np.eye(P.shape[0]) - K @ H_th
+        self.state_server.covariance = I_KH @ P @ I_KH.T + K @ R_n @ K.T
         # Enforce symmetry
         self.state_server.covariance = (self.state_server.covariance + self.state_server.covariance.T) / 2.0
+        return dx
+
+    def _is_unreasonable_update(self, dx: np.ndarray) -> bool:
+        if not np.all(np.isfinite(dx)):
+            return True
+        if np.linalg.norm(dx[0:3]) > self.max_batch_dx_pos_norm:
+            return True
+        if np.linalg.norm(dx[3:6]) > self.max_batch_dx_vel_norm:
+            return True
+        if np.linalg.norm(dx[9:15]) > self.max_batch_dx_bias_norm:
+            return True
+        return False
 
     def apply_state_update(self, dx: np.ndarray):
         """
