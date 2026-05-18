@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, Image, PointCloud2, PointField, CameraInfo
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, Point, Quaternion, TransformStamped
@@ -40,6 +41,27 @@ def put_latest_image(image_queue: queue.Queue, item) -> bool:
         return True
 
 
+def make_sensor_qos(
+    depth: int,
+    reliability_name: str = "reliable",
+) -> QoSProfile:
+    reliability_key = reliability_name.strip().lower()
+    if reliability_key in ("reliable", "reliability_policy_reliable"):
+        reliability = ReliabilityPolicy.RELIABLE
+    elif reliability_key in ("best_effort", "besteffort", "best-effort"):
+        reliability = ReliabilityPolicy.BEST_EFFORT
+    else:
+        raise ValueError(
+            "input_qos_reliability must be 'reliable' or 'best_effort'"
+        )
+
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=depth,
+        reliability=reliability,
+    )
+
+
 class VIOSystemNode(Node):
     def __init__(self):
         super().__init__('vio_system_node')
@@ -69,11 +91,66 @@ class VIOSystemNode(Node):
         self.state_server = StateServer()
         self.imu_propagator = ImuPropagator(self.state_server)
         self.msckf_updater = MSCKFUpdater(self.state_server)
+
+        self.declare_parameter('camera_fx', self.msckf_updater.fx)
+        self.declare_parameter('camera_fy', self.msckf_updater.fy)
+        self.declare_parameter('camera_cx', self.msckf_updater.cx)
+        self.declare_parameter('camera_cy', self.msckf_updater.cy)
+        self.declare_parameter(
+            'camera_distortion',
+            self.msckf_updater.distortion_coefficients.tolist(),
+        )
+        camera_distortion = list(
+            self.get_parameter('camera_distortion')
+            .get_parameter_value()
+            .double_array_value
+        )
+        self.msckf_updater.set_camera_calibration(
+            fx=self.get_parameter('camera_fx').get_parameter_value().double_value,
+            fy=self.get_parameter('camera_fy').get_parameter_value().double_value,
+            cx=self.get_parameter('camera_cx').get_parameter_value().double_value,
+            cy=self.get_parameter('camera_cy').get_parameter_value().double_value,
+            distortion_coefficients=camera_distortion,
+        )
+        self.get_logger().info(
+            "Camera calibration: "
+            f"fx={self.msckf_updater.fx:.6f}, "
+            f"fy={self.msckf_updater.fy:.6f}, "
+            f"cx={self.msckf_updater.cx:.6f}, "
+            f"cy={self.msckf_updater.cy:.6f}, "
+            f"distortion={self.msckf_updater.distortion_coefficients.tolist()}"
+        )
         
         # ROS setup
-        # TODO: Change topics to match your dataset (e.g. EuRoC cam0/image_raw, imu0)
-        self.imu_sub = self.create_subscription(Imu, '/imu0', self.imu_callback, 100)
-        self.img_sub = self.create_subscription(Image, '/cam0/image_raw', self.image_callback, 10)
+        self.declare_parameter('input_qos_reliability', 'reliable')
+        input_qos_reliability = (
+            self.get_parameter('input_qos_reliability')
+            .get_parameter_value()
+            .string_value
+        )
+        imu_qos = make_sensor_qos(
+            depth=100,
+            reliability_name=input_qos_reliability,
+        )
+        image_qos = make_sensor_qos(
+            depth=10,
+            reliability_name=input_qos_reliability,
+        )
+        self.get_logger().info(
+            f"Input sensor QoS reliability: {input_qos_reliability}"
+        )
+        self.imu_sub = self.create_subscription(
+            Imu,
+            '/imu0',
+            self.imu_callback,
+            imu_qos,
+        )
+        self.img_sub = self.create_subscription(
+            Image,
+            '/cam0/image_raw',
+            self.image_callback,
+            image_qos,
+        )
         
         # Publishers for Output and Visualization
         self.odom_pub = self.create_publisher(Odometry, '/vio/odometry', 10)
@@ -336,6 +413,10 @@ class VIOSystemNode(Node):
                 cam_info.distortion_model = "plumb_bob"
                 fx, fy = self.msckf_updater.fx, self.msckf_updater.fy
                 cx, cy = self.msckf_updater.cx, self.msckf_updater.cy
+                cam_info.d = [
+                    float(x)
+                    for x in self.msckf_updater.distortion_coefficients
+                ]
                 cam_info.k = [float(fx), 0.0, float(cx), 0.0, float(fy), float(cy), 0.0, 0.0, 1.0]
                 cam_info.p = [float(fx), 0.0, float(cx), 0.0, 0.0, float(fy), float(cy), 0.0, 0.0, 0.0, 1.0, 0.0]
                 self.cam_info_pub.publish(cam_info)

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from vio_pkg.backend.msckf_updater import MSCKFUpdater
 from vio_pkg.backend.state_server import StateServer
-from vio_pkg.vio_node import put_latest_image
+from vio_pkg.vio_node import make_sensor_qos, put_latest_image
 
 
 def test_put_latest_image_drops_oldest_when_queue_is_full():
@@ -30,6 +30,18 @@ def test_put_latest_image_drops_oldest_when_queue_is_full():
     assert dropped is True
     assert image_queue.qsize() == 1
     assert image_queue.get_nowait() == ("t1", "new")
+
+
+def test_sensor_qos_defaults_to_reliable_for_euroc_bag_playback():
+    qos = make_sensor_qos(depth=10)
+
+    assert qos.reliability.name == "RELIABLE"
+
+
+def test_sensor_qos_can_opt_into_best_effort_for_realsense_bags():
+    qos = make_sensor_qos(depth=10, reliability_name="best_effort")
+
+    assert qos.reliability.name == "BEST_EFFORT"
 
 
 def test_msckf_rejects_unreasonably_large_batch_update_before_mutating_state():
@@ -53,5 +65,7 @@ def test_msckf_rejects_unreasonably_large_batch_update_before_mutating_state():
 
 if __name__ == "__main__":
     test_put_latest_image_drops_oldest_when_queue_is_full()
+    test_sensor_qos_defaults_to_reliable_for_euroc_bag_playback()
+    test_sensor_qos_can_opt_into_best_effort_for_realsense_bags()
     test_msckf_rejects_unreasonably_large_batch_update_before_mutating_state()
     print("Runtime safeguard tests passed.")
