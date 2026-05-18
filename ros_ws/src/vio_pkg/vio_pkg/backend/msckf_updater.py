@@ -24,22 +24,48 @@ class MSCKFUpdater:
         self.max_batch_dx_bias_norm = 0.25
         self.max_update_condition_number = 1e12
 
-        # Euroc MAV dataset cam0 intrinsics (approx baseline)
-        self.fx = 458.654
-        self.fy = 457.296
-        self.cx = 367.215
-        self.cy = 248.375
+        # EuRoC MAV cam0 defaults. Other bags can override these through
+        # VIOSystemNode ROS parameters.
+        self.set_camera_calibration(
+            fx=458.654,
+            fy=457.296,
+            cx=367.215,
+            cy=248.375,
+            distortion_coefficients=[
+                -0.28340811,
+                0.07395907,
+                0.00019359,
+                1.76187114e-05,
+            ],
+        )
+
+    def set_camera_calibration(
+        self,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        distortion_coefficients,
+    ) -> None:
+        if fx <= 0.0 or fy <= 0.0:
+            raise ValueError("Camera focal lengths must be positive")
+
+        distortion = np.asarray(distortion_coefficients, dtype=np.float64)
+        if distortion.ndim != 1 or distortion.size not in (4, 5, 8):
+            raise ValueError(
+                "Distortion coefficients must be a 1D array with 4, 5, or 8 values"
+            )
+
+        self.fx = float(fx)
+        self.fy = float(fy)
+        self.cx = float(cx)
+        self.cy = float(cy)
         self.camera_matrix = np.array([
             [self.fx, 0.0, self.cx],
             [0.0, self.fy, self.cy],
             [0.0, 0.0, 1.0],
         ], dtype=np.float64)
-        self.distortion_coefficients = np.array([
-            -0.28340811,
-            0.07395907,
-            0.00019359,
-            1.76187114e-05,
-        ], dtype=np.float64)
+        self.distortion_coefficients = distortion
 
     def _normalize_observation(self, obs: np.ndarray) -> np.ndarray:
         """
