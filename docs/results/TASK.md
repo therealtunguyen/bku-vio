@@ -1,127 +1,98 @@
 # TASK tracker — Tuần 2 (CO3107 VIO)
 
-> Tracking các nhiệm vụ sếp giao ngày 18/05 → 24/05.
-> Mỗi task: **Yêu cầu** · **Trạng thái** · **Đã làm gì** · **Kết quả / artifact** · **Còn thiếu**.
-> Định nghĩa Done của cả gói: nhóm có **một nguồn duy nhất** cho số liệu; mỗi con số có lệnh + thư mục output; HCMUT không bị nhầm là accuracy result.
+> Index toàn bộ task sếp giao 18/05 → 24/05. Mỗi task có **file kết quả riêng** — click link để xem chi tiết.
+> **Tổng quan:** 6/6 task chính ✅ DONE · 0 BLOCKED · 4 việc mở rộng đang chờ user quyết định.
+> Definition of Done của sếp đã đạt: nhóm có **một nguồn duy nhất** ([`table.md`](table.md)) cho số liệu; mỗi con số có lệnh + thư mục output; HCMUT không bị nhầm là accuracy.
 
-**Tổng quan:** 6/6 task chính ✅ DONE · 0 BLOCKED · 4 việc mở rộng đang chờ user quyết định.
+| Task | Hạn | File kết quả | Trạng thái | Tóm tắt |
+|------|-----|---------------|-----------|---------|
+| **1. Tạo bảng theo dõi** | 18/05 | [`table.md`](table.md) | ✅ DONE | Bảng 8 cột, single source of truth. |
+| **2. Baseline EuRoC** | 18/05 | [`euroc_baseline.md`](euroc_baseline.md) | ✅ DONE — số thật | ATE 0.0905 m, RPE 1 m 0.0949 m, commit `e8425eb`. |
+| **3. HCMUT smoke-test** | 19/05 | [`hcmut_smoke.md`](hcmut_smoke.md) | ✅ DONE — quan sát thật | 221 poses, diverge sau ~12.6 s sim, KHÔNG accuracy. |
+| **4. Lệnh đánh giá lặp lại** | 20/05 | [`eval_commands.md`](eval_commands.md) | ✅ DONE | §A EuRoC, §B HCMUT, §C `evo` trần, §D commit logging. |
+| **5. Trajectory plot cho paper** | 21/05 | [`trajectory_plot.md`](trajectory_plot.md) | ✅ DONE | `docs/paper/figures/euroc_V1_01_easy_baseline.{png,pdf}`. |
+| **6. Checklist Tuần 2** | 23–24/05 | [`week2_checklist.md`](week2_checklist.md) | ✅ DONE | 7 section (A→G), data-freeze 2026-05-30. |
 
 ---
 
-## Task 1 — 18/05 — Tạo bảng theo dõi kết quả
+## Chi tiết từng task
 
-- **Yêu cầu:** Cột dataset / lệnh chạy / thư mục output / ATE / RPE / ghi chú / trạng thái. Output: bảng dùng chung hoặc markdown.
-- **Trạng thái:** ✅ **DONE**
-- **Đã làm:**
-  - Tạo [`docs/results/RESULTS.md`](RESULTS.md) làm single source of truth.
-  - §1 = bảng (8 cột: #, dataset, lệnh rút gọn, bag dir, eval dir, ATE, RPE, ghi chú, trạng thái).
-  - §2 = quy ước thư mục output (bag/, eval/, plots/, run_log.txt).
-  - §4 = quy trình so sánh "tốt hơn không?".
-  - §5 = changelog mỗi lần sửa bảng.
-- **Kết quả:** `docs/results/RESULTS.md` đã commit `e912e41`.
+### Task 1 — 18/05 — Tạo bảng theo dõi kết quả
+
+- **Yêu cầu:** Cột dataset / lệnh / output dir / ATE / RPE / ghi chú / trạng thái. Output: bảng dùng chung hoặc markdown.
+- **File kết quả:** [`table.md`](table.md)
+- **Đã làm:** Bảng 8 cột với 2 dòng (EuRoC baseline `confirmed`, HCMUT `smoke-test`). Kèm quy ước thư mục output, quy trình cập nhật một dòng, và quy trình so sánh "tốt hơn không?".
 - **Còn thiếu:** — không.
 
----
+### Task 2 — 18/05 — Baseline EuRoC `V1_01_easy`
 
-## Task 2 — 18/05 — Thêm kết quả EuRoC hiện tại (baseline đã chốt)
-
-- **Yêu cầu:** Dùng thư mục và số liệu từ kết quả VIO hiện tại. Output: dòng "baseline đã chốt" trong bảng.
-- **Trạng thái:** ✅ **DONE** (đã chạy thật, không phải placeholder)
-- **Đã làm:**
-  - Boot colima → start container `vio-ros2` → cài `numpy<2 evo matplotlib` → `colcon build vio_pkg`.
-  - Chạy `vio_system_node` + `ros2 bag record /vio/odometry /vio/gt_path` + `ros2 bag play V1_01_easy --rate 0.2`.
-  - Wall clock ~13 phút (144 s bag × rate 0.2 + setup + teardown).
-  - Chạy `tools/evaluate_m4.py` → `ape_aligned.zip` + `rpe_1m_aligned.zip`.
-  - Chạy `tools/plot_trajectory.py` → PNG + PDF.
-  - Copy artifact ra host: `results/euroc_V1_01_easy/`.
-  - Điền dòng #1 trong bảng, trạng thái `confirmed`, commit `e8425eb`.
-- **Kết quả (số thật trên `V1_01_easy`, commit `e8425eb`, 2026-05-27):**
-
-  | Metric (SE(3)-aligned) | RMSE [m] | mean | median | std | min | max |
-  |---|---|---|---|---|---|---|
-  | **ATE** (trans) | **0.0905** | 0.0813 | 0.0752 | 0.0397 | 0.0037 | 0.2744 |
-  | **RPE 1 m** (trans, consecutive) | **0.0949** | 0.0898 | 0.0946 | 0.0305 | 0.0242 | 0.1481 |
-
-  - Bag ghi: 2 892 `/vio/odometry` + 146 `/vio/gt_path` poses.
-  - Artifact: `results/euroc_V1_01_easy/{bag,eval,plots,node.log,play.log,record.log,commit.txt,run_time.txt}`.
-- **Còn thiếu:** — không (số đã `confirmed`).
-
----
-
-## Task 3 — 19/05 — Ghi trạng thái dataset HCMUT (smoke test only)
-
-- **Yêu cầu:** Đánh dấu HCMUT = "smoke test only". Lý do: pipeline chạy được nhưng trajectory diverge, calibration chưa xác nhận. Output: dòng HCMUT trong bảng với giới hạn rõ ràng.
-- **Trạng thái:** ✅ **DONE**
-- **Đã làm:**
-  - Dòng #2 trong `RESULTS.md` §1: dataset = `vio_hcmut_dataset (D455)`, ATE/RPE = **N/A**, trạng thái = `smoke-test`.
-  - Ghi chú đầy đủ: (a) calibration camera–IMU extrinsics chưa xác nhận (đang dùng default EuRoC); (b) trajectory diverge sau vài giây; (c) không có ground-truth; (d) **KHÔNG báo accuracy từ dòng này**; (e) điều kiện gating để nâng lên `confirmed` (cần TF static thật từ `librealsense` / `/tf_static`).
-  - Block §3.B trong `RESULTS.md` viết lệnh smoke với cờ rõ: `input_qos_reliability:=best_effort` + remap topic D455.
-  - Checklist §G trong `WEEK2_CHECKLIST.md` ghi rõ HCMUT KHÔNG nằm trong scope tuần 2.
-- **Kết quả:** Dòng #2 bảng, §3.B, §G checklist — committed.
-- **Còn thiếu (optional, không nằm trong yêu cầu):**
-  - Smoke run thực tế (~2 phút) để fill ô `Ghi chú` với số đo quan sát được (số message `/vio/odometry`, thời gian trước khi diverge). Hiện đang là mô tả tổng quát.
-
----
-
-## Task 4 — 20/05 — Chuẩn bị lệnh đánh giá lặp lại
-
-- **Yêu cầu:** Lệnh chính xác cho `tools/evaluate_m4.py`, `evo_ape`, `evo_rpe`. Output: khối lệnh thành viên khác copy-paste chạy lại được.
-- **Trạng thái:** ✅ **DONE**
-- **Đã làm:**
-  - `RESULTS.md` §3.A — block đầy đủ EuRoC: Terminal 1 (launch + tee log), Terminal 2 (`ros2 bag record`), Terminal 3 (`evaluate_m4.py` + `evo_res` + `plot_trajectory.py`).
-  - §3.B — block smoke HCMUT (KHÔNG dùng `evaluate_m4.py`).
-  - §3.C — lệnh `evo_ape` / `evo_rpe` trần, với note "đúng cờ và đúng thứ tự `gt vio` — đừng đổi".
-  - Pre-điều kiện chung: `source ROS + colcon build + source install + pip install evo`.
-  - Quy ước `RUN_TAG=<dataset>_<biến_thể>` để không ghi đè baseline khi test cải tiến.
-- **Kết quả:** `RESULTS.md` §3 — committed.
-- **Còn thiếu:** — không.
-
----
-
-## Task 5 — 21/05 — Biểu đồ trajectory từ EuRoC đã xác nhận
-
-- **Yêu cầu:** Dùng làm hình minh họa nháp trong paper. Output: PNG/PDF + đường dẫn kết quả gốc.
-- **Trạng thái:** ✅ **DONE**
-- **Đã làm:**
-  - Viết `tools/plot_trajectory.py` (nhận 2 file TUM, xuất PNG + PDF, headless-safe).
-  - Smoke-test bằng dữ liệu tổng hợp trước khi giao team.
-  - Chạy với output thật của baseline (Task 2) → ảnh thật.
-  - Copy ảnh từ `results/.../plots/` sang `docs/paper/figures/` để track trong git.
+- **Yêu cầu:** Dùng thư mục và số liệu từ kết quả VIO hiện tại. Output: dòng "baseline đã chốt".
+- **File kết quả:** [`euroc_baseline.md`](euroc_baseline.md) (chi tiết) + dòng #1 trong [`table.md`](table.md) (bảng).
+- **Đã làm:** Chạy thật trong container `vio-ros2` @ commit `e8425eb` (2026-05-27, wall clock ~13 phút). 2 892 odometry poses + 146 GT poses.
 - **Kết quả:**
-  - **Ảnh paper:** `docs/paper/figures/euroc_V1_01_easy_baseline.png` (1200×1100) + `.pdf` (vector).
-  - **Nguồn gốc:** `results/euroc_V1_01_easy/plots/trajectory_xy.{png,pdf}` (gitignored).
-  - **Dữ liệu nguồn:** `results/euroc_V1_01_easy/eval/vio_gt_path.tum` (28 712 GT poses) + `vio_odom.tum` (2 892 VIO poses).
-  - **Lệnh tái tạo:** `python3 tools/plot_trajectory.py --gt <gt.tum> --vio <vio.tum> --out <out.png> --title "..."`.
+  - ATE (trans, SE(3)-aligned) **RMSE 0.0905 m**, mean 0.0813, median 0.0752, std 0.0397, max 0.2744.
+  - RPE 1 m (trans, consecutive) **RMSE 0.0949 m**, mean 0.0898, median 0.0946, std 0.0305, max 0.1481.
+  - Artifact đầy đủ ở `results/euroc_V1_01_easy/`; ảnh paper ở `docs/paper/figures/euroc_V1_01_easy_baseline.{png,pdf}`.
 - **Còn thiếu:** — không.
 
+### Task 3 — 19/05 — HCMUT smoke-test only
+
+- **Yêu cầu:** Đánh dấu "smoke test only", lý do calibration chưa xác nhận + trajectory diverge. Output: dòng HCMUT có giới hạn rõ ràng.
+- **File kết quả:** [`hcmut_smoke.md`](hcmut_smoke.md) (chi tiết) + dòng #2 trong [`table.md`](table.md).
+- **Đã làm:** Chạy smoke thật 2026-05-27 (wall clock 66 s, sim duration 48 s). Có quan sát số đo cụ thể.
+- **Kết quả:**
+  - 221 messages `/vio/odometry` xuất ra → pipeline live.
+  - Diverge: `‖pos‖ > 10 m` lúc sim t = **+12.64 s**; max `‖pos‖` cuối run = **8 836 m**.
+  - Lý do tài liệu hoá: extrinsics camera–IMU = default EuRoC (sai cho D455).
+  - ATE / RPE = **N/A** — không có GT, không chạy `evaluate_m4.py`.
+- **Còn thiếu:** Việc nâng dòng HCMUT lên `confirmed` cần TF static thật + ground-truth scene — ngoài scope Tuần 2 (xem [`week2_checklist.md` §G](week2_checklist.md)).
+
+### Task 4 — 20/05 — Lệnh đánh giá lặp lại
+
+- **Yêu cầu:** Khối lệnh chính xác cho `evaluate_m4.py`, `evo_ape`, `evo_rpe` — copy-paste chạy lại được.
+- **File kết quả:** [`eval_commands.md`](eval_commands.md)
+- **Đã làm:** 4 section:
+  - §A — EuRoC baseline (4 terminal, full pipeline).
+  - §B — HCMUT smoke (3 terminal + verify, KHÔNG chạy evo).
+  - §C — `evo_ape` / `evo_rpe` trần (giữ đúng cờ + thứ tự `gt vio`).
+  - §D — Lưu `commit.txt` kèm mỗi run.
+- **Tự động hoá:** [`tools/_run_baseline_in_container.sh`](../../tools/_run_baseline_in_container.sh) (EuRoC) và [`tools/_run_hcmut_smoke_in_container.sh`](../../tools/_run_hcmut_smoke_in_container.sh) (HCMUT) là 2 orchestrator dùng cho bootstrap; team workflow chính vẫn theo `eval_commands.md`.
+- **Còn thiếu:** — không.
+
+### Task 5 — 21/05 — Biểu đồ trajectory cho paper
+
+- **Yêu cầu:** Hình minh họa nháp từ EuRoC `confirmed`. Output: PNG/PDF + đường dẫn kết quả gốc.
+- **File kết quả:** [`trajectory_plot.md`](trajectory_plot.md) (mô tả) + ảnh thật ở `docs/paper/figures/`.
+- **Đã làm:**
+  - Script: [`tools/plot_trajectory.py`](../../tools/plot_trajectory.py) (TUM → PNG/PDF, headless-safe).
+  - Ảnh paper: `docs/paper/figures/euroc_V1_01_easy_baseline.png` (1200×1100) + `.pdf` (vector).
+  - Ảnh gốc: `results/euroc_V1_01_easy/plots/trajectory_xy.{png,pdf}` (gitignored).
+  - Dữ liệu nguồn: 28 712 GT poses + 2 892 VIO poses từ `results/euroc_V1_01_easy/eval/*.tum`.
+- **Còn thiếu:** — không.
+
+### Task 6 — 23–24/05 — Checklist thực nghiệm Tuần 2
+
+- **Yêu cầu:** Liệt kê toàn bộ run cần làm trước data-freeze.
+- **File kết quả:** [`week2_checklist.md`](week2_checklist.md)
+- **Đã làm:** 7 section:
+  - **A.** Trước khi chạy (commit hash, rebuild, sanity tests). Pending.
+  - **B.** Baseline EuRoC — ✅ đã xong.
+  - **C.** Biến thể EuRoC (`no_gt_init`, `imu_init_100`, `meas_noise_1e-3`). Pending.
+  - **D.** Sequence khác (`V1_02_medium`, `V2_01_easy`). Optional.
+  - **E.** HCMUT smoke — ✅ đã xong.
+  - **F.** Kiểm tra trước data-freeze (đề xuất tag `data-freeze-week2`).
+  - **G.** Việc còn thiếu để HCMUT thành accuracy — out-of-scope Tuần 2.
+- **Còn thiếu:** thực thi check-box trong A/C/D/F là task tuần sau, không phải bản thân checklist.
+
 ---
 
-## Task 6 — 23–24/05 — Checklist thực nghiệm Tuần 2
-
-- **Yêu cầu:** Liệt kê toàn bộ run cần làm trước data-freeze. Output: checklist đầy đủ.
-- **Trạng thái:** ✅ **DONE**
-- **Đã làm:** Tạo [`docs/results/WEEK2_CHECKLIST.md`](WEEK2_CHECKLIST.md) gồm 7 section:
-  - **A.** Trước khi chạy bất kỳ run nào (commit hash, rebuild, sanity tests).
-  - **B.** Baseline EuRoC `V1_01_easy` — BẮT BUỘC. ← *đã làm xong trong Task 2.*
-  - **C.** EuRoC biến thể (no_gt_init / imu_init_100 / meas_noise_1e-3) để trả lời "tốt hơn không?".
-  - **D.** EuRoC sequence khác (V1_02_medium, V2_01_easy) — optional.
-  - **E.** HCMUT smoke — BẮT BUỘC để confirm pipeline live, KHÔNG tính accuracy.
-  - **F.** Kiểm tra trước data-freeze (đề xuất tag `data-freeze-week2` ngày 2026-05-30).
-  - **G.** Việc còn thiếu để HCMUT mới được tính accuracy (out-of-scope tuần 2).
-- **Kết quả:** `docs/results/WEEK2_CHECKLIST.md` — committed.
-- **Còn thiếu:** — không (đó là checklist; *thực thi* checklist là task tuần sau).
-
----
-
-## Definition of Done (sếp ghi)
+## Definition of Done của sếp
 
 | Tiêu chí | Trạng thái |
 |---|---|
-| Nhóm có một nguồn duy nhất cho số liệu | ✅ `docs/results/RESULTS.md` |
-| Mỗi con số có lệnh và thư mục output đi kèm | ✅ Dòng baseline có `RESULTS.md §3.A` + `results/euroc_V1_01_easy/` |
-| HCMUT không bị nhầm là accuracy | ✅ Dòng #2 trạng thái `smoke-test`, ATE/RPE = **N/A**, ghi rõ lý do + điều kiện gating |
-
-→ **Định nghĩa Done của gói tuần 2 đã đạt.**
+| Nhóm có một nguồn duy nhất cho số liệu | ✅ [`table.md`](table.md) |
+| Mỗi con số có lệnh + thư mục output đi kèm | ✅ Dòng baseline: lệnh ở [`eval_commands.md §A`](eval_commands.md), output ở `results/euroc_V1_01_easy/` |
+| HCMUT không bị nhầm là accuracy | ✅ Dòng #2 `smoke-test`, ATE/RPE = **N/A**, [`hcmut_smoke.md`](hcmut_smoke.md) giải thích chi tiết |
 
 ---
 
@@ -129,40 +100,40 @@
 
 | # | Việc | Lý do chưa làm | Thời gian ước tính |
 |---|---|---|---|
-| E1 | `git push origin feature/backend-tyler` | Commit `e912e41` đang local; push là action ra mạng, không tự làm. | < 1 phút |
-| E2 | HCMUT smoke run thực tế → fill số observation vào dòng #2 | Optional (yêu cầu sếp đã đạt với mô tả tổng quát). | ~3 phút |
-| E3 | EuRoC biến thể (1-3 cái: `no_gt_init`, `imu_init_100`, `meas_noise_1e-3`) | Nằm trong checklist §C nhưng là task tuần sau, không phải tuần 2. | ~15 phút / biến thể |
-| E4 | EuRoC sequence khác (`V1_02_medium`, `V2_01_easy`) | Cần download dataset; checklist §D đánh dấu optional. | ~20 phút / sequence |
+| E1 | `git push origin feature/backend-tyler` | Push là action ra mạng, không tự làm. | < 1 phút |
+| E2 | Biến thể EuRoC (1-3 cái: `no_gt_init`, `imu_init_100`, `meas_noise_1e-3`) | Nằm trong [`week2_checklist.md §C`](week2_checklist.md) nhưng là task tuần sau. | ~15 phút / biến thể |
+| E3 | EuRoC sequence khác (`V1_02_medium`, `V2_01_easy`) | Cần download dataset; checklist §D đánh dấu optional. | ~20 phút / sequence |
+| E4 | Gating HCMUT (TF static + GT) | Out-of-scope Tuần 2 — checklist §G. | Cần hardware/MoCap session, không tự làm được. |
 
-Nói "push", "smoke", "biến thể X", hoặc "sequence Y" thì tôi chạy tiếp.
+Nói `push`, `biến thể X`, hoặc `sequence Y` thì tôi chạy tiếp.
 
 ---
 
-## File quan trọng (cheat-sheet)
+## Cấu trúc thư mục
 
 ```
-docs/
-├── results/
-│   ├── TASK.md              ← file này
-│   ├── RESULTS.md           ← bảng + lệnh + quy trình so sánh
-│   └── WEEK2_CHECKLIST.md   ← checklist tuần 2
-└── paper/
-    └── figures/
-        ├── euroc_V1_01_easy_baseline.png   ← cho slide
-        └── euroc_V1_01_easy_baseline.pdf   ← cho paper LaTeX
+docs/results/
+├── TASK.md              ← file này (index)
+├── table.md             ← Task 1: bảng tracking
+├── euroc_baseline.md    ← Task 2: baseline EuRoC chi tiết
+├── hcmut_smoke.md       ← Task 3: HCMUT smoke chi tiết
+├── eval_commands.md     ← Task 4: lệnh copy-paste
+├── trajectory_plot.md   ← Task 5: ảnh + cách tái tạo
+└── week2_checklist.md   ← Task 6: checklist Tuần 2
 
-results/                     ← gitignore; artifact thô
-└── euroc_V1_01_easy/
-    ├── bag/                 (raw recorded /vio/odometry + /vio/gt_path)
-    ├── eval/                (vio_odom.tum, vio_gt_path.tum, ape_aligned.zip, rpe_1m_aligned.zip)
-    ├── plots/               (trajectory_xy.png + .pdf)
-    ├── node.log play.log record.log
-    └── commit.txt run_time.txt
+docs/paper/figures/
+├── euroc_V1_01_easy_baseline.png    ← slide / web
+└── euroc_V1_01_easy_baseline.pdf    ← LaTeX vector
+
+results/                 ← gitignore; artifact thô per-run
+├── euroc_V1_01_easy/    (bag, eval, plots, *.log, commit.txt)
+└── hcmut_smoke/         (bag, *.log)
 
 tools/
-├── evaluate_m4.py                       (đã có sẵn — bag → TUM + evo)
-├── plot_trajectory.py                   (mới — TUM → PNG/PDF)
-└── _run_baseline_in_container.sh        (mới — orchestrator dùng cho run baseline; team theo §3 thay vì script này)
+├── evaluate_m4.py                          (có sẵn — bag → TUM + evo)
+├── plot_trajectory.py                      (mới — TUM → PNG/PDF)
+├── _run_baseline_in_container.sh           (mới — orchestrator baseline)
+└── _run_hcmut_smoke_in_container.sh        (mới — orchestrator smoke)
 ```
 
-Commit cuối: `e912e41 docs(results): add single-source-of-truth tracking + EuRoC V1_01_easy baseline`.
+Commit gần nhất: `git log --oneline -3` để xem.

@@ -1,11 +1,15 @@
 # BKU-VIO — Visual-Inertial Odometry (CO3107)
 
-> **Cần con số ATE / RPE hoặc trả lời câu hỏi "kết quả có tốt hơn không?"** →
-> đọc [`docs/results/RESULTS.md`](docs/results/RESULTS.md) (single source of
-> truth) và [`docs/results/WEEK2_CHECKLIST.md`](docs/results/WEEK2_CHECKLIST.md)
-> trước khi chạy bất kỳ run mới nào. Mọi accuracy number trong báo cáo phải
-> có một dòng tương ứng trong `RESULTS.md` ở trạng thái `confirmed`. HCMUT
-> hiện vẫn là `smoke-test only` — không dùng làm accuracy result.
+> **Kết quả & số liệu** → bắt đầu ở [`docs/results/TASK.md`](docs/results/TASK.md)
+> (index của tất cả task tuần 2). Các file con:
+> [`table.md`](docs/results/table.md) (bảng số liệu — single source of truth),
+> [`eval_commands.md`](docs/results/eval_commands.md) (lệnh chạy lại),
+> [`euroc_baseline.md`](docs/results/euroc_baseline.md),
+> [`hcmut_smoke.md`](docs/results/hcmut_smoke.md),
+> [`trajectory_plot.md`](docs/results/trajectory_plot.md),
+> [`week2_checklist.md`](docs/results/week2_checklist.md).
+> Mọi accuracy number trong báo cáo phải có một dòng `confirmed` trong `table.md`.
+> HCMUT hiện vẫn là `smoke-test only` — không dùng làm accuracy result.
 
 ## 0. Trạng thái hiện tại
 
