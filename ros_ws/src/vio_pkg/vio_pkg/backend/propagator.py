@@ -8,6 +8,9 @@ class ImuPropagator:
     def __init__(self, state_server: StateServer):
         self.state_server = state_server
         self.gravity = np.array([0, 0, -9.81])
+        self.max_imu_dt = 0.05
+        self.last_large_dt_count = 0
+        self.last_max_dt = 0.0
         
         # Continuous time noise density
         self.noise_gyro = 1e-3
@@ -58,6 +61,8 @@ class ImuPropagator:
         if not imu_data_list:
             return
 
+        self.last_large_dt_count = 0
+        self.last_max_dt = 0.0
         for i in range(len(imu_data_list)):
             imu = imu_data_list[i]
             
@@ -68,6 +73,12 @@ class ImuPropagator:
                 
             dt = imu.timestamp - self.state_server.state.timestamp
             if dt <= 0:
+                continue
+            self.last_max_dt = max(self.last_max_dt, dt)
+            if dt > self.max_imu_dt:
+                with self.state_server.lock:
+                    self.state_server.state.timestamp = imu.timestamp
+                self.last_large_dt_count += 1
                 continue
 
             state = self.state_server.state

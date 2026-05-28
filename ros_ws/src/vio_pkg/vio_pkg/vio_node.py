@@ -9,6 +9,7 @@ from tf2_ros import TransformBroadcaster
 from builtin_interfaces.msg import Time
 import csv
 import struct
+import time
 import numpy as np
 import threading
 import queue
@@ -41,6 +42,53 @@ def put_latest_image(image_queue: queue.Queue, item) -> bool:
         return True
 
 
+def prepare_image_for_processing(
+    image: np.ndarray,
+    target_width: int = 0,
+) -> tuple[np.ndarray, float]:
+    """
+    Optionally resize an image before frontend tracking.
+
+    target_width <= 0 keeps the input resolution. Wider images are resized to
+    target_width while preserving aspect ratio; smaller images are not upscaled.
+    """
+    image_width = int(image.shape[1])
+    if target_width <= 0 or image_width <= target_width:
+        return image, 1.0
+
+    import cv2
+
+    scale = float(target_width) / float(image_width)
+    target_height = max(1, int(round(float(image.shape[0]) * scale)))
+    resized = cv2.resize(
+        image,
+        (int(target_width), target_height),
+        interpolation=cv2.INTER_AREA,
+    )
+    return resized, scale
+
+
+def compute_effective_camera_calibration(
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    distortion_coefficients,
+    scale: float,
+) -> tuple[float, float, float, float, np.ndarray]:
+    """Scale pinhole intrinsics for resized images; distortion is unchanged."""
+    if scale <= 0.0:
+        raise ValueError("image processing scale must be positive")
+
+    return (
+        float(fx) * scale,
+        float(fy) * scale,
+        float(cx) * scale,
+        float(cy) * scale,
+        np.asarray(distortion_coefficients, dtype=np.float64),
+    )
+
+
 def make_sensor_qos(
     depth: int,
     reliability_name: str = "reliable",
@@ -69,8 +117,19 @@ class VIOSystemNode(Node):
         # Thread-safe queues and locks
         self.imu_buffer = [] 
         self.imu_lock = threading.Lock()
-        
-        self.image_queue = queue.Queue(maxsize=50)
+
+        self.declare_parameter('image_queue_size', 50)
+        image_queue_size = (
+            self.get_parameter('image_queue_size')
+            .get_parameter_value()
+            .integer_value
+        )
+        if image_queue_size < 1:
+            self.get_logger().warn(
+                "image_queue_size must be >= 1; falling back to 50"
+            )
+            image_queue_size = 50
+        self.image_queue = queue.Queue(maxsize=int(image_queue_size))
         
         # Initialization flags
         self.is_initialized = False
@@ -84,6 +143,46 @@ class VIOSystemNode(Node):
         
         # Modules
         self.frontend_config = FrontendConfig()
+        self.declare_parameter('image_processing_width', 0)
+        self.declare_parameter('runtime_diagnostics_enabled', False)
+        self.declare_parameter('diagnostics_log_every_n_frames', 10)
+        self.declare_parameter('publish_debug_image', True)
+        self.declare_parameter('log_tracked_frames', True)
+        self.image_processing_width = (
+            self.get_parameter('image_processing_width')
+            .get_parameter_value()
+            .integer_value
+        )
+        if self.image_processing_width < 0:
+            self.get_logger().warn(
+                "image_processing_width must be >= 0; disabling resize"
+            )
+            self.image_processing_width = 0
+        self.runtime_diagnostics_enabled = (
+            self.get_parameter('runtime_diagnostics_enabled')
+            .get_parameter_value()
+            .bool_value
+        )
+        self.diagnostics_log_every_n_frames = (
+            self.get_parameter('diagnostics_log_every_n_frames')
+            .get_parameter_value()
+            .integer_value
+        )
+        if self.diagnostics_log_every_n_frames < 1:
+            self.get_logger().warn(
+                "diagnostics_log_every_n_frames must be >= 1; falling back to 10"
+            )
+            self.diagnostics_log_every_n_frames = 10
+        self.publish_debug_image = (
+            self.get_parameter('publish_debug_image')
+            .get_parameter_value()
+            .bool_value
+        )
+        self.log_tracked_frames = (
+            self.get_parameter('log_tracked_frames')
+            .get_parameter_value()
+            .bool_value
+        )
         self.detector = ShiTomasiDetector(self.frontend_config)
         self.tracker = KLTTracker(self.frontend_config)
         self.frontend = FeatureManager(self.detector, self.tracker, self.frontend_config)
@@ -91,6 +190,85 @@ class VIOSystemNode(Node):
         self.state_server = StateServer()
         self.imu_propagator = ImuPropagator(self.state_server)
         self.msckf_updater = MSCKFUpdater(self.state_server)
+        self.declare_parameter('max_imu_dt', self.imu_propagator.max_imu_dt)
+        self.declare_parameter(
+            'max_batch_dx_pos_norm',
+            self.msckf_updater.max_batch_dx_pos_norm,
+        )
+        self.declare_parameter(
+            'max_batch_dx_vel_norm',
+            self.msckf_updater.max_batch_dx_vel_norm,
+        )
+        self.declare_parameter(
+            'max_batch_dx_bias_norm',
+            self.msckf_updater.max_batch_dx_bias_norm,
+        )
+        self.imu_propagator.max_imu_dt = (
+            self.get_parameter('max_imu_dt')
+            .get_parameter_value()
+            .double_value
+        )
+        if self.imu_propagator.max_imu_dt <= 0.0:
+            self.get_logger().warn("max_imu_dt must be > 0; falling back to 0.05")
+            self.imu_propagator.max_imu_dt = 0.05
+        self.msckf_updater.max_batch_dx_pos_norm = (
+            self.get_parameter('max_batch_dx_pos_norm')
+            .get_parameter_value()
+            .double_value
+        )
+        self.msckf_updater.max_batch_dx_vel_norm = (
+            self.get_parameter('max_batch_dx_vel_norm')
+            .get_parameter_value()
+            .double_value
+        )
+        self.msckf_updater.max_batch_dx_bias_norm = (
+            self.get_parameter('max_batch_dx_bias_norm')
+            .get_parameter_value()
+            .double_value
+        )
+        if self.msckf_updater.max_batch_dx_pos_norm <= 0.0:
+            self.get_logger().warn(
+                "max_batch_dx_pos_norm must be > 0; falling back to 0.5"
+            )
+            self.msckf_updater.max_batch_dx_pos_norm = 0.5
+        if self.msckf_updater.max_batch_dx_vel_norm <= 0.0:
+            self.get_logger().warn(
+                "max_batch_dx_vel_norm must be > 0; falling back to 1.0"
+            )
+            self.msckf_updater.max_batch_dx_vel_norm = 1.0
+        if self.msckf_updater.max_batch_dx_bias_norm <= 0.0:
+            self.get_logger().warn(
+                "max_batch_dx_bias_norm must be > 0; falling back to 0.25"
+            )
+            self.msckf_updater.max_batch_dx_bias_norm = 0.25
+
+        self.declare_parameter(
+            'camera_R_IC',
+            self.state_server.R_IC.reshape(-1).tolist(),
+        )
+        self.declare_parameter(
+            'camera_t_IC',
+            self.state_server.t_IC.tolist(),
+        )
+        camera_R_IC = np.array(
+            list(
+                self.get_parameter('camera_R_IC')
+                .get_parameter_value()
+                .double_array_value
+            ),
+            dtype=np.float64,
+        ).reshape(3, 3)
+        camera_t_IC = list(
+            self.get_parameter('camera_t_IC')
+            .get_parameter_value()
+            .double_array_value
+        )
+        self.state_server.set_camera_extrinsics(camera_R_IC, camera_t_IC)
+        self.get_logger().info(
+            "Camera-IMU extrinsics: "
+            f"R_IC={self.state_server.R_IC.tolist()}, "
+            f"t_IC={self.state_server.t_IC.tolist()}"
+        )
 
         self.declare_parameter('camera_fx', self.msckf_updater.fx)
         self.declare_parameter('camera_fy', self.msckf_updater.fy)
@@ -105,21 +283,45 @@ class VIOSystemNode(Node):
             .get_parameter_value()
             .double_array_value
         )
-        self.msckf_updater.set_camera_calibration(
-            fx=self.get_parameter('camera_fx').get_parameter_value().double_value,
-            fy=self.get_parameter('camera_fy').get_parameter_value().double_value,
-            cx=self.get_parameter('camera_cx').get_parameter_value().double_value,
-            cy=self.get_parameter('camera_cy').get_parameter_value().double_value,
-            distortion_coefficients=camera_distortion,
+        self.base_camera_fx = (
+            self.get_parameter('camera_fx').get_parameter_value().double_value
+        )
+        self.base_camera_fy = (
+            self.get_parameter('camera_fy').get_parameter_value().double_value
+        )
+        self.base_camera_cx = (
+            self.get_parameter('camera_cx').get_parameter_value().double_value
+        )
+        self.base_camera_cy = (
+            self.get_parameter('camera_cy').get_parameter_value().double_value
+        )
+        self.base_camera_distortion = np.asarray(camera_distortion, dtype=np.float64)
+        self._calibration_scale_applied = None
+        self._apply_effective_camera_calibration(scale=1.0)
+        self.get_logger().info(
+            "Base camera calibration: "
+            f"fx={self.base_camera_fx:.6f}, "
+            f"fy={self.base_camera_fy:.6f}, "
+            f"cx={self.base_camera_cx:.6f}, "
+            f"cy={self.base_camera_cy:.6f}, "
+            f"distortion={self.base_camera_distortion.tolist()}"
         )
         self.get_logger().info(
-            "Camera calibration: "
-            f"fx={self.msckf_updater.fx:.6f}, "
-            f"fy={self.msckf_updater.fy:.6f}, "
-            f"cx={self.msckf_updater.cx:.6f}, "
-            f"cy={self.msckf_updater.cy:.6f}, "
-            f"distortion={self.msckf_updater.distortion_coefficients.tolist()}"
+            "Image processing: "
+            f"target_width={self.image_processing_width}, "
+            f"queue_size={self.image_queue.maxsize}, "
+            f"diagnostics={self.runtime_diagnostics_enabled}, "
+            f"publish_debug_image={self.publish_debug_image}, "
+            f"log_tracked_frames={self.log_tracked_frames}, "
+            f"max_imu_dt={self.imu_propagator.max_imu_dt:.4f}, "
+            f"max_dx_pos={self.msckf_updater.max_batch_dx_pos_norm:.4f}, "
+            f"max_dx_vel={self.msckf_updater.max_batch_dx_vel_norm:.4f}, "
+            f"max_dx_bias={self.msckf_updater.max_batch_dx_bias_norm:.4f}"
         )
+        self.images_received = 0
+        self.images_enqueued = 0
+        self.images_dropped = 0
+        self.images_processed = 0
         
         # ROS setup
         self.declare_parameter('input_qos_reliability', 'reliable')
@@ -254,10 +456,27 @@ class VIOSystemNode(Node):
             self._first_img_rcv = True
             
         curr_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        cv_img = self._ros_image_to_gray(msg)
-        
-        if put_latest_image(self.image_queue, (curr_time, cv_img)):
+        decode_start = time.perf_counter()
+        full_res_img = self._ros_image_to_gray(msg)
+        cv_img, image_scale = prepare_image_for_processing(
+            full_res_img,
+            target_width=int(self.image_processing_width),
+        )
+        decode_resize_ms = (time.perf_counter() - decode_start) * 1000.0
+        self._apply_effective_camera_calibration(
+            scale=image_scale,
+            original_shape=full_res_img.shape,
+            processed_shape=cv_img.shape,
+        )
+
+        self.images_received += 1
+        if put_latest_image(
+            self.image_queue,
+            (curr_time, cv_img, image_scale, decode_resize_ms),
+        ):
+            self.images_dropped += 1
             self.get_logger().warn("Image queue full. Dropped stale frame.")
+        self.images_enqueued += 1
 
     def _load_gt_path(self, csv_path: str) -> Path:
         path = Path()
@@ -314,6 +533,46 @@ class VIOSystemNode(Node):
 
         raise ValueError(f"Unsupported image encoding: {msg.encoding!r}")
 
+    def _apply_effective_camera_calibration(
+        self,
+        scale: float,
+        original_shape: tuple | None = None,
+        processed_shape: tuple | None = None,
+    ) -> None:
+        if (
+            self._calibration_scale_applied is not None
+            and np.isclose(self._calibration_scale_applied, scale)
+        ):
+            return
+
+        fx, fy, cx, cy, distortion = compute_effective_camera_calibration(
+            fx=self.base_camera_fx,
+            fy=self.base_camera_fy,
+            cx=self.base_camera_cx,
+            cy=self.base_camera_cy,
+            distortion_coefficients=self.base_camera_distortion,
+            scale=scale,
+        )
+        self.msckf_updater.set_camera_calibration(
+            fx=fx,
+            fy=fy,
+            cx=cx,
+            cy=cy,
+            distortion_coefficients=distortion,
+        )
+        self._calibration_scale_applied = float(scale)
+
+        shape_note = ""
+        if original_shape is not None and processed_shape is not None:
+            shape_note = f", image_shape={original_shape}->{processed_shape}"
+        self.get_logger().info(
+            "Effective camera calibration: "
+            f"scale={scale:.6f}, "
+            f"fx={fx:.6f}, fy={fy:.6f}, "
+            f"cx={cx:.6f}, cy={cy:.6f}"
+            f"{shape_note}"
+        )
+
     def _bgr_image_to_msg(self, image: np.ndarray) -> Image:
         msg = Image()
         msg.height = int(image.shape[0])
@@ -332,9 +591,16 @@ class VIOSystemNode(Node):
             try:
                 # 1. Block until a new image arrives (1 s timeout to allow clean shutdown).
                 try:
-                    image_time, image = self.image_queue.get(timeout=1.0)
+                    (
+                        image_time,
+                        image,
+                        image_scale,
+                        decode_resize_ms,
+                    ) = self.image_queue.get(timeout=1.0)
                 except queue.Empty:
                     continue
+                frame_start = time.perf_counter()
+                previous_image_time = self.last_image_time
 
                 # 2. Extract IMU measurements between the previous and current frame.
                 with self.imu_lock:
@@ -348,8 +614,16 @@ class VIOSystemNode(Node):
                     ]
 
                 # 3. IMU Prediction (propagate state forward — backend stub for now).
+                imu_span = 0.0
+                if imu_measurements:
+                    imu_span = (
+                        imu_measurements[-1].timestamp
+                        - imu_measurements[0].timestamp
+                    )
+                propagate_start = time.perf_counter()
                 if imu_measurements:
                     self.imu_propagator.propagate(imu_measurements)
+                propagate_ms = (time.perf_counter() - propagate_start) * 1000.0
 
                 # 4. Add the camera clone at this image timestamp, then use
                 # that exact clone pose for frontend track bookkeeping.
@@ -364,11 +638,14 @@ class VIOSystemNode(Node):
                     )
 
                 # 5. Feature Tracking.
+                frontend_start = time.perf_counter()
                 mature_features = self.frontend.process_image(
                     image_time, image, current_cam_pose
                 )
+                frontend_ms = (time.perf_counter() - frontend_start) * 1000.0
 
                 # 6. MSCKF measurement update and map point triangulation.
+                backend_start = time.perf_counter()
                 with self.state_server.lock:
                     self.msckf_updater.process_mature_features(mature_features)
                     update_stats = dict(self.msckf_updater.last_update_stats)
@@ -389,25 +666,35 @@ class VIOSystemNode(Node):
 
                     if len(self.global_map_points) > 100000:
                         self.global_map_points = self.global_map_points[-100000:]
+                backend_ms = (time.perf_counter() - backend_start) * 1000.0
 
                 # 7. Publish visualizer image
-                import cv2
-                debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-                for track in self.frontend.active_tracks:
-                    pt = track.observations[-1]
-                    cv2.circle(debug_img, (int(pt[0]), int(pt[1])), 3, (0, 255, 0), -1)
-                
-                # Convert float timestamp back to ROS Time message
+                publish_start = time.perf_counter()
                 sec = int(image_time)
                 nanosec = int((image_time - sec) * 1e9)
-                img_msg = self._bgr_image_to_msg(debug_img)
-                img_msg.header.stamp = Time(sec=sec, nanosec=nanosec)
-                img_msg.header.frame_id = "cam0"
-                self.debug_img_pub.publish(img_msg)
+                image_stamp = Time(sec=sec, nanosec=nanosec)
+                if self.publish_debug_image:
+                    import cv2
+
+                    debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+                    for track in self.frontend.active_tracks:
+                        pt = track.observations[-1]
+                        cv2.circle(
+                            debug_img,
+                            (int(pt[0]), int(pt[1])),
+                            3,
+                            (0, 255, 0),
+                            -1,
+                        )
+                    img_msg = self._bgr_image_to_msg(debug_img)
+                    img_msg.header.stamp = image_stamp
+                    img_msg.header.frame_id = "cam0"
+                    self.debug_img_pub.publish(img_msg)
 
                 # Publish CameraInfo cho AR Overlay rviz2
                 cam_info = CameraInfo()
-                cam_info.header = img_msg.header
+                cam_info.header.stamp = image_stamp
+                cam_info.header.frame_id = "cam0"
                 cam_info.width = image.shape[1]
                 cam_info.height = image.shape[0]
                 cam_info.distortion_model = "plumb_bob"
@@ -420,10 +707,12 @@ class VIOSystemNode(Node):
                 cam_info.k = [float(fx), 0.0, float(cx), 0.0, float(fy), float(cy), 0.0, 0.0, 1.0]
                 cam_info.p = [float(fx), 0.0, float(cx), 0.0, 0.0, float(fy), float(cy), 0.0, 0.0, 0.0, 1.0, 0.0]
                 self.cam_info_pub.publish(cam_info)
+                publish_ms = (time.perf_counter() - publish_start) * 1000.0
 
                 # 8. Publish state and diagnostics after the visual update.
                 self.publish_state(image_time)
                 self.backend_frame_count += 1
+                self.images_processed += 1
                 if self.backend_frame_count % 10 == 0:
                     pos, vel, accel_bias, gyro_bias = state_snapshot
                     self.get_logger().info(
@@ -441,10 +730,47 @@ class VIOSystemNode(Node):
                         f"dx_ba={update_stats.get('dx_accel_bias_norm', 0.0):.3e}, "
                         f"pos={pos}, vel={vel}, ba={accel_bias}, bg={gyro_bias}"
                     )
-                self.get_logger().info(
-                    f"Successfully tracked and published frame at ts={image_time:.3f} "
-                    f"(New Points: {new_points_count})"
-                )
+                if (
+                    self.runtime_diagnostics_enabled
+                    and self.images_processed % self.diagnostics_log_every_n_frames == 0
+                ):
+                    timestamp_gap = 0.0
+                    if previous_image_time >= 0.0:
+                        timestamp_gap = image_time - previous_image_time
+                    pos, vel, _, _ = state_snapshot
+                    total_ms = (time.perf_counter() - frame_start) * 1000.0
+                    self.get_logger().info(
+                        "Runtime diagnostics: "
+                        f"frame={self.images_processed}, "
+                        f"shape={image.shape}, "
+                        f"scale={image_scale:.6f}, "
+                        f"queue={self.image_queue.qsize()}/{self.image_queue.maxsize}, "
+                        f"received={self.images_received}, "
+                        f"enqueued={self.images_enqueued}, "
+                        f"dropped={self.images_dropped}, "
+                        f"dt_img={timestamp_gap:.4f}s, "
+                        f"imu_count={len(imu_measurements)}, "
+                        f"imu_span={imu_span:.4f}s, "
+                        f"imu_large_dt_skips={self.imu_propagator.last_large_dt_count}, "
+                        f"imu_max_dt={self.imu_propagator.last_max_dt:.4f}s, "
+                        f"decode_resize={decode_resize_ms:.1f}ms, "
+                        f"propagate={propagate_ms:.1f}ms, "
+                        f"frontend={frontend_ms:.1f}ms, "
+                        f"backend={backend_ms:.1f}ms, "
+                        f"publish={publish_ms:.1f}ms, "
+                        f"total={total_ms:.1f}ms, "
+                        f"pos={pos}, "
+                        f"vel_norm={np.linalg.norm(vel):.3f}"
+                    )
+                    if timestamp_gap > 0.1:
+                        self.get_logger().warn(
+                            f"Large image timestamp gap: {timestamp_gap:.4f}s"
+                        )
+                if self.log_tracked_frames:
+                    self.get_logger().info(
+                        f"Successfully tracked and published frame at ts={image_time:.3f} "
+                        f"(New Points: {new_points_count})"
+                    )
 
                 self.last_image_time = image_time
             except Exception as e:

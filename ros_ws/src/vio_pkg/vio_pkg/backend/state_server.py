@@ -8,12 +8,16 @@ class StateServer:
         self.state = State(timestamp=0.0)
         
         # Euroc V1_01_easy cam0 to imu0 extrinsics (Default fallback)
-        self.R_IC = R_IC if R_IC is not None else np.array([
+        default_R_IC = np.array([
             [ 0.0148655429818, -0.999880929698,  0.004140296794],
             [ 0.999557249008,  0.014967213324,  0.025715529948],
             [-0.0257744366974, 0.003756188357,  0.999660727108]
         ])
-        self.t_IC = t_IC if t_IC is not None else np.array([-0.0216401455, -0.0646769868, 0.0098107306])
+        default_t_IC = np.array([-0.0216401455, -0.0646769868, 0.0098107306])
+        self.set_camera_extrinsics(
+            default_R_IC if R_IC is None else R_IC,
+            default_t_IC if t_IC is None else t_IC,
+        )
         
         # Covariance matrix P
         # 15x15 for error state
@@ -32,6 +36,23 @@ class StateServer:
         
         # Concurrency Lock
         self.lock = threading.RLock()
+
+    def set_camera_extrinsics(self, R_IC, t_IC) -> None:
+        R_IC = np.asarray(R_IC, dtype=np.float64)
+        t_IC = np.asarray(t_IC, dtype=np.float64)
+
+        if R_IC.shape != (3, 3):
+            raise ValueError("R_IC must be a 3x3 rotation matrix")
+        if t_IC.shape != (3,):
+            raise ValueError("t_IC must be a 3-vector")
+
+        if not np.allclose(R_IC.T @ R_IC, np.eye(3), atol=1e-6):
+            raise ValueError("R_IC must be orthonormal")
+        if not np.isclose(np.linalg.det(R_IC), 1.0, atol=1e-6):
+            raise ValueError("R_IC must have determinant +1")
+
+        self.R_IC = R_IC
+        self.t_IC = t_IC
         
     def add_clone(self, timestamp: float, position: np.ndarray, quaternion: np.ndarray):
         """

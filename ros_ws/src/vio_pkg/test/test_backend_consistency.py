@@ -188,6 +188,21 @@ def test_msckf_camera_calibration_can_be_configured_for_hcmut_bag():
     assert updater.distortion_coefficients.shape == (5,)
 
 
+def test_state_server_camera_extrinsics_can_be_configured_for_hcmut_bag():
+    server = _make_server()
+    r_ic = np.array([
+        [2.033476571297e-03, 1.534356741860e-04, 9.999979207131e-01],
+        [-9.999966540050e-01, -1.598738420073e-03, 2.033719299488e-03],
+        [1.599047140929e-03, -9.999987102456e-01, 1.501841636702e-04],
+    ])
+    t_ic = np.array([0.015779949041, -0.028793809935, -0.007352355558])
+
+    server.set_camera_extrinsics(r_ic, t_ic)
+
+    assert np.allclose(server.R_IC, r_ic)
+    assert np.allclose(server.t_IC, t_ic)
+
+
 def test_msckf_rejects_features_when_required_clone_was_marginalized():
     server = _make_server()
     updater = MSCKFUpdater(server)
@@ -224,5 +239,6 @@ if __name__ == "__main__":
     test_msckf_uses_authoritative_state_server_clones_not_frontend_snapshots()
     test_msckf_undistorts_euroc_observations_before_triangulation()
     test_msckf_camera_calibration_can_be_configured_for_hcmut_bag()
+    test_state_server_camera_extrinsics_can_be_configured_for_hcmut_bag()
     test_msckf_rejects_features_when_required_clone_was_marginalized()
     print("Backend consistency tests passed.")
