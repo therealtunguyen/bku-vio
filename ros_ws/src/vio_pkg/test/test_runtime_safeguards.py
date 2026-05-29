@@ -8,6 +8,7 @@ Run from the ROS workspace root:
 import os
 import queue
 import sys
+import threading
 
 import numpy as np
 
@@ -18,10 +19,15 @@ from vio_pkg.backend.propagator import ImuPropagator
 from vio_pkg.backend.state_server import StateServer
 from vio_pkg.utils.common import ImuData
 from vio_pkg.vio_node import (
+    VIOSystemNode,
+    compute_static_imu_initialization,
     compute_effective_camera_calibration,
+    is_frame_timestamp_discontinuity,
     make_sensor_qos,
     prepare_image_for_processing,
     put_latest_image,
+    sanitize_time_gap_threshold,
+    update_initial_imu_buffer,
 )
 
 
@@ -135,6 +141,187 @@ def test_msckf_rejects_unreasonably_large_batch_update_before_mutating_state():
     assert np.allclose(server.covariance, initial_covariance)
 
 
+def test_msckf_update_stats_report_ill_conditioned_rejection_reason():
+    server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+    updater = MSCKFUpdater(server)
+    updater.max_update_condition_number = 1.0
+
+    H = np.eye(server.covariance.shape[0])
+    residual = np.ones(server.covariance.shape[0])
+
+    updater.measurement_update(H, residual)
+
+    assert updater.last_batch_rejected is True
+    assert updater.last_rejection_reason == "ill_conditioned"
+    assert updater.last_innovation_condition_number > updater.max_update_condition_number
+
+
+def test_msckf_update_stats_report_unreasonable_dx_rejection_reason():
+    server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+    updater = MSCKFUpdater(server)
+    updater.max_batch_dx_bias_norm = 1e-6
+
+    H = np.zeros((2, server.covariance.shape[0]))
+    H[:, 9:11] = np.eye(2)
+    residual = np.array([1.0, 1.0])
+
+    updater.measurement_update(H, residual)
+
+    assert updater.last_batch_rejected is True
+    assert updater.last_rejection_reason == "unreasonable_dx"
+    assert updater.last_dx_bg_norm > updater.max_batch_dx_bias_norm
+
+
+def test_vio_node_can_skip_msckf_updates_without_skipping_frame_processing():
+    node = object.__new__(VIOSystemNode)
+    node.enable_msckf_updates = False
+    node.msckf_updater = type(
+        "DummyUpdater",
+        (),
+        {
+            "process_mature_features": lambda self, features: (_ for _ in ()).throw(
+                AssertionError("MSCKF update should be skipped")
+            ),
+            "last_update_stats": {"accepted": 123},
+        },
+    )()
+
+    update_stats = VIOSystemNode._run_msckf_update(node, ["feature"])
+
+    assert update_stats["skipped"] == 1
+    assert update_stats["mature"] == 1
+    assert update_stats["accepted"] == 0
+
+
+def test_vio_node_requests_stop_after_requested_processed_frame_count():
+    node = object.__new__(VIOSystemNode)
+    node.stop_after_processed_frames = 2
+    node.images_processed = 1
+
+    assert VIOSystemNode._should_request_stop(node) is False
+
+    node.images_processed = 2
+
+    assert VIOSystemNode._should_request_stop(node) is True
+
+
+def test_update_initial_imu_buffer_resets_on_large_timestamp_gap():
+    first = ImuData(
+        timestamp=1.0,
+        accel=np.zeros(3),
+        gyro=np.zeros(3),
+    )
+    second = ImuData(
+        timestamp=1.2,
+        accel=np.ones(3),
+        gyro=np.ones(3),
+    )
+
+    updated, was_reset, gap = update_initial_imu_buffer([first], second, 0.1)
+
+    assert was_reset is True
+    assert np.isclose(gap, 0.2)
+    assert updated == [second]
+
+
+def test_static_imu_initialization_matches_level_stationary_case():
+    samples = [
+        ImuData(
+            timestamp=1.0 + 0.01 * idx,
+            accel=np.array([0.0, 0.0, 9.81]),
+            gyro=np.array([0.01, -0.02, 0.03]),
+        )
+        for idx in range(5)
+    ]
+
+    q_init, gyro_bias, accel_bias, init_end_time = compute_static_imu_initialization(
+        samples
+    )
+
+    assert np.allclose(q_init, np.array([1.0, 0.0, 0.0, 0.0]))
+    assert np.allclose(gyro_bias, np.array([0.01, -0.02, 0.03]))
+    assert np.allclose(accel_bias, np.zeros(3), atol=1e-8)
+    assert np.isclose(init_end_time, samples[-1].timestamp)
+
+
+def test_frame_timestamp_discontinuity_detects_backward_and_large_forward_jumps():
+    assert is_frame_timestamp_discontinuity(10.0, 9.5, 0.1) is True
+    assert is_frame_timestamp_discontinuity(10.0, 10.25, 0.1) is True
+    assert is_frame_timestamp_discontinuity(10.0, 10.03, 0.1) is False
+
+
+def test_frame_timestamp_discontinuity_can_tolerate_brief_frame_drops():
+    assert is_frame_timestamp_discontinuity(10.0, 10.1667, 0.2) is False
+    assert is_frame_timestamp_discontinuity(10.0, 10.2501, 0.2) is True
+
+
+def test_sanitize_time_gap_threshold_falls_back_for_non_positive_values():
+    assert np.isclose(sanitize_time_gap_threshold(0.2, 0.1), 0.2)
+    assert np.isclose(sanitize_time_gap_threshold(0.0, 0.1), 0.1)
+    assert np.isclose(sanitize_time_gap_threshold(-1.0, 0.1), 0.1)
+
+
+def test_state_server_rejects_unknown_camera_extrinsics_convention():
+    server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+
+    try:
+        server.set_camera_extrinsics(
+            np.eye(3),
+            np.zeros(3),
+            convention="not_a_real_convention",
+        )
+    except ValueError as exc:
+        assert "convention" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unknown convention")
+
+
+def test_vio_node_resets_temporal_state_on_frame_timestamp_discontinuity():
+    node = object.__new__(VIOSystemNode)
+    node.frontend = type(
+        "DummyFrontend",
+        (),
+        {
+            "active_tracks": [object()],
+            "mature_tracks": [object()],
+            "_prev_image": np.zeros((2, 2), dtype=np.uint8),
+            "reset": lambda self: (
+                self.active_tracks.clear(),
+                self.mature_tracks.clear(),
+                setattr(self, "_prev_image", None),
+            ),
+        },
+    )()
+    node.state_server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+    node.state_server.add_clone(1.0, np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    node.state_server.state.timestamp = 12.0
+    node.last_image_time = 12.0
+    node._discontinuity_reset_count = 0
+    node.max_frame_timestamp_gap = 0.1
+    node.imu_lock = threading.Lock()
+    node.imu_buffer = [
+        ImuData(timestamp=8.5, accel=np.zeros(3), gyro=np.zeros(3)),
+        ImuData(timestamp=9.5, accel=np.zeros(3), gyro=np.zeros(3)),
+    ]
+    node.get_logger = lambda: type(
+        "DummyLogger",
+        (),
+        {"warn": lambda self, msg: None},
+    )()
+
+    VIOSystemNode._handle_frame_timestamp_discontinuity(node, 9.0, -3.0)
+
+    assert node.last_image_time == 9.0
+    assert node.state_server.state.timestamp == 9.0
+    assert node.state_server.state.clone_poses == []
+    assert node.state_server.covariance.shape == (15, 15)
+    assert [imu.timestamp for imu in node.imu_buffer] == [9.5]
+    assert node.frontend.active_tracks == []
+    assert node.frontend.mature_tracks == []
+    assert node.frontend._prev_image is None
+    assert node._discontinuity_reset_count == 1
+
+
 if __name__ == "__main__":
     test_put_latest_image_drops_oldest_when_queue_is_full()
     test_sensor_qos_defaults_to_reliable_for_euroc_bag_playback()
@@ -144,4 +331,15 @@ if __name__ == "__main__":
     test_effective_camera_calibration_scales_intrinsics_not_distortion()
     test_imu_propagator_skips_unreasonably_large_dt_discontinuity()
     test_msckf_rejects_unreasonably_large_batch_update_before_mutating_state()
+    test_msckf_update_stats_report_ill_conditioned_rejection_reason()
+    test_msckf_update_stats_report_unreasonable_dx_rejection_reason()
+    test_vio_node_can_skip_msckf_updates_without_skipping_frame_processing()
+    test_vio_node_requests_stop_after_requested_processed_frame_count()
+    test_update_initial_imu_buffer_resets_on_large_timestamp_gap()
+    test_static_imu_initialization_matches_level_stationary_case()
+    test_frame_timestamp_discontinuity_detects_backward_and_large_forward_jumps()
+    test_frame_timestamp_discontinuity_can_tolerate_brief_frame_drops()
+    test_sanitize_time_gap_threshold_falls_back_for_non_positive_values()
+    test_state_server_rejects_unknown_camera_extrinsics_convention()
+    test_vio_node_resets_temporal_state_on_frame_timestamp_discontinuity()
     print("Runtime safeguard tests passed.")

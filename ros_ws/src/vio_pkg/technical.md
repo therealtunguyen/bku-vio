@@ -87,7 +87,9 @@ dễ diverge dù image tracking vẫn chạy.
 Dataset HCMUT/D455 hiện dùng được như smoke test, chưa dùng làm accuracy result:
 
 - RGB-only bags: dùng cho frontend/ArUco/demo, không đủ IMU để chạy VIO đầy đủ.
-- `vio_hcmut_dataset`: có color image và IMU, nhưng thiếu camera-IMU extrinsics.
+- `vio_hcmut_dataset`: có color image và IMU, chạy được full VIO smoke test với
+  intrinsics D455 và extrinsics lấy từ `tf_static`, nhưng chưa nên dùng làm
+  metric-accuracy result.
 
 D455 color intrinsics từ rosbag:
 
@@ -100,10 +102,21 @@ D=[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.00081835
 ```
 
 Với D455/HCMUT, dùng `input_qos_reliability:=best_effort` nếu bag/device publish
-sensor topics bằng best-effort QoS. Để có metric VIO đúng, cần lấy per-device
-transform giữa color camera optical frame và IMU frame từ RealSense/librealsense
-hoặc ROS `/tf_static`; không dùng giá trị D455 chung trên mạng như calibration
-thật.
+sensor topics bằng best-effort QoS. Quan trọng: extrinsics phải khớp đúng
+message frame trong bag. Bag này publish image ở `camera_color_optical_frame`
+và IMU ở `camera_imu_optical_frame`, nên transform đúng là
+`camera_imu_optical_frame -> camera_color_optical_frame`, không phải
+`camera_imu_frame -> camera_color_optical_frame`.
+
+Transform D455/HCMUT đang dùng cho smoke test:
+
+```text
+R =
+[[ 0.999996654005,  0.001598738420, -0.002033719299],
+ [-0.001599047141,  0.999998710246, -0.000150184164],
+ [ 0.002033476571,  0.000153435674,  0.999997920713]]
+t = [0.028793809935, 0.007352355558, 0.015779949041]
+```
 
 ## 5. Verification
 

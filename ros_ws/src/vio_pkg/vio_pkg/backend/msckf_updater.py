@@ -16,6 +16,9 @@ class MSCKFUpdater:
         self.measurement_noise = 1e-4
         self.last_update_stats = {}
         self.last_batch_rejected = False
+        self.last_rejection_reason = None
+        self.last_innovation_condition_number = 0.0
+        self.last_dx_bg_norm = 0.0
 
         # Runtime safety rails. These are intentionally conservative because a
         # single bad visual batch can destroy the inertial state.
@@ -125,8 +128,13 @@ class MSCKFUpdater:
             "dx_norm": 0.0,
             "dx_pos_norm": 0.0,
             "dx_vel_norm": 0.0,
+            "dx_bg_norm": 0.0,
             "dx_accel_bias_norm": 0.0,
             "batch_rejected": 0,
+            "rejected_ill_conditioned": 0,
+            "rejected_unreasonable_dx": 0,
+            "innovation_condition_number": 0.0,
+            "skipped": 0,
         }
 
         if not mature_features:
@@ -173,8 +181,18 @@ class MSCKFUpdater:
         stats["dx_norm"] = float(np.linalg.norm(dx))
         stats["dx_pos_norm"] = float(np.linalg.norm(dx[0:3]))
         stats["dx_vel_norm"] = float(np.linalg.norm(dx[3:6]))
+        stats["dx_bg_norm"] = float(np.linalg.norm(dx[9:12]))
         stats["dx_accel_bias_norm"] = float(np.linalg.norm(dx[12:15]))
         stats["batch_rejected"] = int(self.last_batch_rejected)
+        stats["rejected_ill_conditioned"] = int(
+            self.last_rejection_reason == "ill_conditioned"
+        )
+        stats["rejected_unreasonable_dx"] = int(
+            self.last_rejection_reason == "unreasonable_dx"
+        )
+        stats["innovation_condition_number"] = float(
+            self.last_innovation_condition_number
+        )
         self.last_update_stats = stats
 
     def triangulate_feature(self, feature: FeatureTrack):
@@ -323,6 +341,9 @@ class MSCKFUpdater:
         Standard Kalman Filter update to correct State and Covariance.
         """
         self.last_batch_rejected = False
+        self.last_rejection_reason = None
+        self.last_innovation_condition_number = 0.0
+        self.last_dx_bg_norm = 0.0
 
         # Compress H and r using Thin QR to speed up matrix inversion
         if H_all.shape[0] > H_all.shape[1]:
@@ -338,16 +359,26 @@ class MSCKFUpdater:
         # Kalman Gain
         R_n = np.eye(H_th.shape[0]) * self.measurement_noise
         S = H_th @ P @ H_th.T + R_n
-        if not np.all(np.isfinite(S)) or np.linalg.cond(S) > self.max_update_condition_number:
+        if not np.all(np.isfinite(S)):
             self.last_batch_rejected = True
+            self.last_rejection_reason = "ill_conditioned"
+            self.last_innovation_condition_number = float("inf")
+            return np.zeros(P.shape[0])
+
+        self.last_innovation_condition_number = float(np.linalg.cond(S))
+        if self.last_innovation_condition_number > self.max_update_condition_number:
+            self.last_batch_rejected = True
+            self.last_rejection_reason = "ill_conditioned"
             return np.zeros(P.shape[0])
 
         K = P @ H_th.T @ linalg.inv(S)
 
         # Update State
         dx = K @ r_th
+        self.last_dx_bg_norm = float(np.linalg.norm(dx[9:12]))
         if self._is_unreasonable_update(dx):
             self.last_batch_rejected = True
+            self.last_rejection_reason = "unreasonable_dx"
             return dx
 
         self.apply_state_update(dx)

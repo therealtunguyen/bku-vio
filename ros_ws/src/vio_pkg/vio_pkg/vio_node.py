@@ -110,6 +110,88 @@ def make_sensor_qos(
     )
 
 
+def update_initial_imu_buffer(
+    initial_imu_buffer: list[ImuData],
+    imu_data: ImuData,
+    max_gap_s: float,
+) -> tuple[list[ImuData], bool, float]:
+    """
+    Append an IMU sample to the gravity-init buffer, resetting the buffer if the
+    stream jumps backward or stalls long enough to invalidate static averaging.
+    """
+    if not initial_imu_buffer:
+        return [imu_data], False, 0.0
+
+    gap = float(imu_data.timestamp - initial_imu_buffer[-1].timestamp)
+    if gap <= 0.0 or gap > max_gap_s:
+        return [imu_data], True, gap
+
+    updated = initial_imu_buffer.copy()
+    updated.append(imu_data)
+    return updated, False, gap
+
+
+def compute_static_imu_initialization(
+    initial_imu_buffer: list[ImuData],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """
+    Solve the static startup attitude and biases from buffered IMU samples.
+    Returns (q_init, gyro_bias, accel_bias, init_end_time).
+    """
+    if not initial_imu_buffer:
+        raise ValueError("initial_imu_buffer must not be empty")
+
+    a_avg = np.mean([m.accel for m in initial_imu_buffer], axis=0)
+    w_avg = np.mean([m.gyro for m in initial_imu_buffer], axis=0)
+
+    z_axis = a_avg / np.linalg.norm(a_avg)
+    target_z = np.array([0.0, 0.0, 1.0])
+    v = np.cross(z_axis, target_z)
+    s = np.linalg.norm(v)
+    c = np.dot(z_axis, target_z)
+
+    if s < 1e-6:
+        q_init = (
+            np.array([1.0, 0.0, 0.0, 0.0])
+            if c > 0
+            else np.array([0.0, 1.0, 0.0, 0.0])
+        )
+    else:
+        v_skew = np.array(
+            [[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]]
+        )
+        R = np.eye(3) + v_skew + (v_skew @ v_skew) * ((1 - c) / (s**2))
+        q_init = matrix_to_quaternion(R)
+
+    R_init = quaternion_to_matrix(q_init)
+    expected_static_accel = R_init.T @ np.array([0.0, 0.0, 9.81])
+    ba_init = a_avg - expected_static_accel
+    init_end_time = float(initial_imu_buffer[-1].timestamp)
+    return q_init, w_avg, ba_init, init_end_time
+
+
+def is_frame_timestamp_discontinuity(
+    previous_image_time: float,
+    image_time: float,
+    max_gap_s: float,
+) -> bool:
+    if previous_image_time < 0.0:
+        return False
+
+    gap = float(image_time - previous_image_time)
+    return gap <= 0.0 or gap > max_gap_s
+
+
+def sanitize_time_gap_threshold(
+    configured_value: float,
+    fallback_value: float,
+) -> float:
+    """Return a positive time-gap threshold, falling back on invalid input."""
+    if configured_value > 0.0:
+        return float(configured_value)
+    return float(fallback_value)
+
+
 class VIOSystemNode(Node):
     def __init__(self):
         super().__init__('vio_system_node')
@@ -148,6 +230,10 @@ class VIOSystemNode(Node):
         self.declare_parameter('diagnostics_log_every_n_frames', 10)
         self.declare_parameter('publish_debug_image', True)
         self.declare_parameter('log_tracked_frames', True)
+        self.declare_parameter('enable_msckf_updates', True)
+        self.declare_parameter('stop_after_processed_frames', 0)
+        self.declare_parameter('max_imu_init_gap', 0.1)
+        self.declare_parameter('max_frame_timestamp_gap', 0.1)
         self.image_processing_width = (
             self.get_parameter('image_processing_width')
             .get_parameter_value()
@@ -183,6 +269,47 @@ class VIOSystemNode(Node):
             .get_parameter_value()
             .bool_value
         )
+        self.enable_msckf_updates = (
+            self.get_parameter('enable_msckf_updates')
+            .get_parameter_value()
+            .bool_value
+        )
+        self.stop_after_processed_frames = (
+            self.get_parameter('stop_after_processed_frames')
+            .get_parameter_value()
+            .integer_value
+        )
+        if self.stop_after_processed_frames < 0:
+            self.get_logger().warn(
+                "stop_after_processed_frames must be >= 0; disabling frame stop"
+            )
+            self.stop_after_processed_frames = 0
+        configured_max_imu_init_gap = (
+            self.get_parameter('max_imu_init_gap')
+            .get_parameter_value()
+            .double_value
+        )
+        configured_max_frame_timestamp_gap = (
+            self.get_parameter('max_frame_timestamp_gap')
+            .get_parameter_value()
+            .double_value
+        )
+        self.max_imu_init_gap = sanitize_time_gap_threshold(
+            configured_max_imu_init_gap,
+            fallback_value=0.1,
+        )
+        self.max_frame_timestamp_gap = sanitize_time_gap_threshold(
+            configured_max_frame_timestamp_gap,
+            fallback_value=0.1,
+        )
+        if configured_max_imu_init_gap <= 0.0:
+            self.get_logger().warn(
+                "max_imu_init_gap must be > 0; falling back to 0.1"
+            )
+        if configured_max_frame_timestamp_gap <= 0.0:
+            self.get_logger().warn(
+                "max_frame_timestamp_gap must be > 0; falling back to 0.1"
+            )
         self.detector = ShiTomasiDetector(self.frontend_config)
         self.tracker = KLTTracker(self.frontend_config)
         self.frontend = FeatureManager(self.detector, self.tracker, self.frontend_config)
@@ -250,6 +377,10 @@ class VIOSystemNode(Node):
             'camera_t_IC',
             self.state_server.t_IC.tolist(),
         )
+        self.declare_parameter(
+            'camera_extrinsics_convention',
+            'camera_in_imu',
+        )
         camera_R_IC = np.array(
             list(
                 self.get_parameter('camera_R_IC')
@@ -263,9 +394,19 @@ class VIOSystemNode(Node):
             .get_parameter_value()
             .double_array_value
         )
-        self.state_server.set_camera_extrinsics(camera_R_IC, camera_t_IC)
+        camera_extrinsics_convention = (
+            self.get_parameter('camera_extrinsics_convention')
+            .get_parameter_value()
+            .string_value
+        )
+        self.state_server.set_camera_extrinsics(
+            camera_R_IC,
+            camera_t_IC,
+            convention=camera_extrinsics_convention,
+        )
         self.get_logger().info(
             "Camera-IMU extrinsics: "
+            f"input_convention={camera_extrinsics_convention}, "
             f"R_IC={self.state_server.R_IC.tolist()}, "
             f"t_IC={self.state_server.t_IC.tolist()}"
         )
@@ -313,6 +454,10 @@ class VIOSystemNode(Node):
             f"diagnostics={self.runtime_diagnostics_enabled}, "
             f"publish_debug_image={self.publish_debug_image}, "
             f"log_tracked_frames={self.log_tracked_frames}, "
+            f"enable_msckf_updates={self.enable_msckf_updates}, "
+            f"stop_after_processed_frames={self.stop_after_processed_frames}, "
+            f"max_imu_init_gap={self.max_imu_init_gap:.4f}, "
+            f"max_frame_timestamp_gap={self.max_frame_timestamp_gap:.4f}, "
             f"max_imu_dt={self.imu_propagator.max_imu_dt:.4f}, "
             f"max_dx_pos={self.msckf_updater.max_batch_dx_pos_norm:.4f}, "
             f"max_dx_vel={self.msckf_updater.max_batch_dx_vel_norm:.4f}, "
@@ -322,6 +467,8 @@ class VIOSystemNode(Node):
         self.images_enqueued = 0
         self.images_dropped = 0
         self.images_processed = 0
+        self._discontinuity_reset_count = 0
+        self._shutdown_requested = False
         
         # ROS setup
         self.declare_parameter('input_qos_reliability', 'reliable')
@@ -405,36 +552,32 @@ class VIOSystemNode(Node):
             
             # Static IMU Initialization
             if not self.gravity_aligned:
-                self.initial_imu_buffer.append(imu_data)
+                updated_init_buffer, was_reset, gap = update_initial_imu_buffer(
+                    self.initial_imu_buffer,
+                    imu_data,
+                    self.max_imu_init_gap,
+                )
+                if was_reset:
+                    self.get_logger().warn(
+                        "Resetting IMU init buffer after timestamp discontinuity: "
+                        f"dt={gap:.4f}s"
+                    )
+                self.initial_imu_buffer = updated_init_buffer
                 if len(self.initial_imu_buffer) >= self.imu_init_sample_count:
-                    a_avg = np.mean([m.accel for m in self.initial_imu_buffer], axis=0)
-                    w_avg = np.mean([m.gyro for m in self.initial_imu_buffer], axis=0)
-                    # Find R_WI that rotates a_avg/norm to [0, 0, 1]
-                    z_axis = a_avg / np.linalg.norm(a_avg)
-                    target_z = np.array([0.0, 0.0, 1.0])
-                    v = np.cross(z_axis, target_z)
-                    s = np.linalg.norm(v)
-                    c = np.dot(z_axis, target_z)
-                    
-                    if s < 1e-6:
-                        q_init = np.array([1.0, 0.0, 0.0, 0.0]) if c > 0 else np.array([0.0, 1.0, 0.0, 0.0])
-                    else:
-                        v_skew = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-                        R = np.eye(3) + v_skew + (v_skew @ v_skew) * ((1 - c) / (s**2))
-                        q_init = matrix_to_quaternion(R)
-
-                    R_init = quaternion_to_matrix(q_init)
-                    expected_static_accel = R_init.T @ np.array([0.0, 0.0, 9.81])
-                    ba_init = a_avg - expected_static_accel
-                    
+                    q_init, w_avg, ba_init, init_end_time = (
+                        compute_static_imu_initialization(self.initial_imu_buffer)
+                    )
+                    a_avg = np.mean(
+                        [m.accel for m in self.initial_imu_buffer],
+                        axis=0,
+                    )
                     with self.state_server.lock:
                         self.state_server.state.quaternion = q_init
                         self.state_server.state.gyro_bias = w_avg
                         self.state_server.state.accel_bias = ba_init
-                        self.state_server.state.timestamp = self.initial_imu_buffer[-1].timestamp
+                        self.state_server.state.timestamp = init_end_time
                         
                     init_start_time = self.initial_imu_buffer[0].timestamp
-                    init_end_time = self.initial_imu_buffer[-1].timestamp
                     init_duration = init_end_time - init_start_time
                     self.imu_buffer = [
                         m for m in self.imu_buffer
@@ -445,7 +588,10 @@ class VIOSystemNode(Node):
                         "Gravity Aligned! Initial Pitch/Roll solved. "
                         f"samples: {len(self.initial_imu_buffer)}, "
                         f"duration: {init_duration:.3f}s, "
-                        f"a_avg: {a_avg}, gyro_bias: {w_avg}, accel_bias: {ba_init}"
+                        f"q_init={q_init.tolist()}, "
+                        f"a_avg={a_avg.tolist()}, |a_avg|={np.linalg.norm(a_avg):.6f}, "
+                        f"w_avg={w_avg.tolist()}, "
+                        f"ba_init={ba_init.tolist()}, |ba_init|={np.linalg.norm(ba_init):.6f}"
                     )
                     
     def image_callback(self, msg: Image):
@@ -601,6 +747,16 @@ class VIOSystemNode(Node):
                     continue
                 frame_start = time.perf_counter()
                 previous_image_time = self.last_image_time
+                if is_frame_timestamp_discontinuity(
+                    previous_image_time,
+                    image_time,
+                    self.max_frame_timestamp_gap,
+                ):
+                    self._handle_frame_timestamp_discontinuity(
+                        image_time=image_time,
+                        timestamp_gap=image_time - previous_image_time,
+                    )
+                    continue
 
                 # 2. Extract IMU measurements between the previous and current frame.
                 with self.imu_lock:
@@ -647,8 +803,7 @@ class VIOSystemNode(Node):
                 # 6. MSCKF measurement update and map point triangulation.
                 backend_start = time.perf_counter()
                 with self.state_server.lock:
-                    self.msckf_updater.process_mature_features(mature_features)
-                    update_stats = dict(self.msckf_updater.last_update_stats)
+                    update_stats = self._run_msckf_update(mature_features)
                     state = self.state_server.state
                     state_snapshot = (
                         state.position.copy(),
@@ -724,10 +879,15 @@ class VIOSystemNode(Node):
                         f"gated_out={update_stats.get('gated_out', 0)}, "
                         f"invalid={update_stats.get('invalid_jacobian', 0)}, "
                         f"triangulation_failed={update_stats.get('triangulation_failed', 0)}, "
+                        f"rejected_ill_conditioned={update_stats.get('rejected_ill_conditioned', 0)}, "
+                        f"rejected_unreasonable_dx={update_stats.get('rejected_unreasonable_dx', 0)}, "
+                        f"skipped={update_stats.get('skipped', 0)}, "
                         f"rows={update_stats.get('rows', 0)}, "
                         f"dx_pos={update_stats.get('dx_pos_norm', 0.0):.3e}, "
                         f"dx_vel={update_stats.get('dx_vel_norm', 0.0):.3e}, "
+                        f"dx_bg={update_stats.get('dx_bg_norm', 0.0):.3e}, "
                         f"dx_ba={update_stats.get('dx_accel_bias_norm', 0.0):.3e}, "
+                        f"innovation_cond={update_stats.get('innovation_condition_number', 0.0):.3e}, "
                         f"pos={pos}, vel={vel}, ba={accel_bias}, bg={gyro_bias}"
                     )
                 if (
@@ -737,7 +897,7 @@ class VIOSystemNode(Node):
                     timestamp_gap = 0.0
                     if previous_image_time >= 0.0:
                         timestamp_gap = image_time - previous_image_time
-                    pos, vel, _, _ = state_snapshot
+                    pos, vel, accel_bias, gyro_bias = state_snapshot
                     total_ms = (time.perf_counter() - frame_start) * 1000.0
                     self.get_logger().info(
                         "Runtime diagnostics: "
@@ -760,7 +920,9 @@ class VIOSystemNode(Node):
                         f"publish={publish_ms:.1f}ms, "
                         f"total={total_ms:.1f}ms, "
                         f"pos={pos}, "
-                        f"vel_norm={np.linalg.norm(vel):.3f}"
+                        f"vel_norm={np.linalg.norm(vel):.3f}, "
+                        f"|ba|={np.linalg.norm(accel_bias):.3f}, "
+                        f"|bg|={np.linalg.norm(gyro_bias):.3f}"
                     )
                     if timestamp_gap > 0.1:
                         self.get_logger().warn(
@@ -773,8 +935,76 @@ class VIOSystemNode(Node):
                     )
 
                 self.last_image_time = image_time
+                if self._should_request_stop():
+                    self._request_shutdown(
+                        "Reached stop_after_processed_frames="
+                        f"{self.stop_after_processed_frames}"
+                    )
             except Exception as e:
                 self.get_logger().error(f"Ordered VIO Worker Crashed: {e}")
+
+    def _run_msckf_update(self, mature_features):
+        if not self.enable_msckf_updates:
+            return {
+                "mature": len(mature_features),
+                "too_short": 0,
+                "triangulated": 0,
+                "triangulation_failed": 0,
+                "invalid_jacobian": 0,
+                "gated_out": 0,
+                "accepted": 0,
+                "rows": 0,
+                "dx_norm": 0.0,
+                "dx_pos_norm": 0.0,
+                "dx_vel_norm": 0.0,
+                "dx_bg_norm": 0.0,
+                "dx_accel_bias_norm": 0.0,
+                "batch_rejected": 0,
+                "rejected_ill_conditioned": 0,
+                "rejected_unreasonable_dx": 0,
+                "innovation_condition_number": 0.0,
+                "skipped": 1,
+            }
+
+        self.msckf_updater.process_mature_features(mature_features)
+        return dict(self.msckf_updater.last_update_stats)
+
+    def _handle_frame_timestamp_discontinuity(
+        self,
+        image_time: float,
+        timestamp_gap: float,
+    ) -> None:
+        self._discontinuity_reset_count += 1
+        self.get_logger().warn(
+            "Resetting temporal state after image timestamp discontinuity: "
+            f"dt_img={timestamp_gap:.4f}s, reset_count={self._discontinuity_reset_count}"
+        )
+
+        with self.imu_lock:
+            self.imu_buffer = [
+                m for m in self.imu_buffer
+                if m.timestamp > image_time
+            ]
+
+        self.frontend.reset()
+        with self.state_server.lock:
+            self.state_server.clear_clones()
+            self.state_server.state.timestamp = image_time
+        self.last_image_time = image_time
+
+    def _should_request_stop(self) -> bool:
+        return (
+            self.stop_after_processed_frames > 0
+            and self.images_processed >= self.stop_after_processed_frames
+        )
+
+    def _request_shutdown(self, reason: str) -> None:
+        if self._shutdown_requested:
+            return
+        self._shutdown_requested = True
+        self.get_logger().info(f"Stopping node: {reason}")
+        if rclpy.ok():
+            rclpy.shutdown()
 
     def publish_state(self, timestamp: float):
         """
@@ -900,7 +1130,8 @@ def main(args=None):
     node = VIOSystemNode()
     rclpy.spin(node)
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

@@ -176,8 +176,9 @@ colcon build --packages-select vio_pkg
 
 ## 10. Chạy smoke test cho HCMUT/D455
 
-HCMUT/D455 không phải accuracy run hiện tại vì thiếu camera-IMU extrinsics.
-Chỉ dùng để kiểm tra node có nhận image/IMU và chạy được.
+HCMUT/D455 chưa phải accuracy run chính thức, nhưng đã có một smoke-test path
+ổn định hơn với intrinsics D455 và extrinsics lấy đúng từ
+`camera_imu_optical_frame -> camera_color_optical_frame`.
 
 Color camera intrinsics từ `/camera/camera/color/camera_info`:
 
@@ -189,7 +190,17 @@ cy=362.999176
 D=[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]
 ```
 
-Khi chạy HCMUT/D455, dùng `input_qos_reliability:=best_effort` và remap topic:
+Có thể dùng launch preset:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+source install/setup.bash
+
+ros2 launch vio_pkg vio_hcmut.launch.py
+```
+
+Hoặc chạy tay để thấy đầy đủ params:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -198,12 +209,26 @@ source install/setup.bash
 
 ros2 run vio_pkg vio_system_node --ros-args \
   -p use_sim_time:=true \
+  -p imu_init_sample_count:=120 \
   -p input_qos_reliability:=best_effort \
+  -p image_processing_width:=752 \
+  -p image_queue_size:=50 \
+  -p runtime_diagnostics_enabled:=true \
+  -p diagnostics_log_every_n_frames:=10 \
+  -p publish_debug_image:=false \
+  -p log_tracked_frames:=false \
+  -p max_imu_dt:=0.05 \
+  -p max_batch_dx_bias_norm:=0.03 \
+  -p max_imu_init_gap:=0.2 \
+  -p max_frame_timestamp_gap:=0.25 \
   -p camera_fx:=646.33728 \
   -p camera_fy:=645.676147 \
   -p camera_cx:=643.358276 \
   -p camera_cy:=362.999176 \
-  -p camera_distortion:="[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]"
+  -p camera_distortion:="[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]" \
+  -p camera_extrinsics_convention:=camera_in_imu \
+  -p camera_R_IC:="[0.999996654005, 0.00159873842, -0.002033719299, -0.001599047141, 0.999998710246, -0.000150184164, 0.002033476571, 0.000153435674, 0.999997920713]" \
+  -p camera_t_IC:="[0.028793809935, 0.007352355558, 0.015779949041]"
 ```
 
 Trong terminal khác:
@@ -214,8 +239,9 @@ ros2 bag play /home/ubuntu/VIO/dataset/vio_hcmut_dataset --clock --rate 1.0 \
   --remap /camera/camera/color/image_raw:=/cam0/image_raw /camera/camera/imu:=/imu0
 ```
 
-Để dùng HCMUT/D455 làm kết quả metric, cần lấy transform thật giữa color camera
-optical frame và IMU frame từ RealSense/librealsense hoặc ROS `/tf_static`.
+Lưu ý: bag này publish IMU ở `camera_imu_optical_frame`, không phải
+`camera_imu_frame`. Dùng nhầm frame variant cho extrinsics sẽ làm triangulation
+và MSCKF update xấu đi rõ rệt.
 
 ## Cấu trúc thư mục
 

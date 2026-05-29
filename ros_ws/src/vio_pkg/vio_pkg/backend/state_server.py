@@ -3,8 +3,53 @@ import threading
 from ..utils.common import State, ClonePose
 from .math_utils import quaternion_to_matrix, matrix_to_quaternion, skew_symmetric
 
+VALID_CAMERA_EXTRINSICS_CONVENTIONS = (
+    "camera_in_imu",
+    "imu_in_camera",
+)
+
+
+def canonicalize_camera_extrinsics(
+    R,
+    t,
+    *,
+    convention: str = "camera_in_imu",
+):
+    """
+    Normalize input extrinsics to the internal camera-in-IMU convention.
+
+    Internal representation:
+      p_I = R_IC @ p_C + t_IC
+    which means:
+      R_IC rotates camera-frame vectors into the IMU frame
+      t_IC is the camera origin expressed in the IMU frame
+    """
+    R = np.asarray(R, dtype=np.float64)
+    t = np.asarray(t, dtype=np.float64)
+
+    if R.shape != (3, 3):
+        raise ValueError("R must be a 3x3 rotation matrix")
+    if t.shape != (3,):
+        raise ValueError("t must be a 3-vector")
+    if not np.allclose(R.T @ R, np.eye(3), atol=1e-6):
+        raise ValueError("R must be orthonormal")
+    if not np.isclose(np.linalg.det(R), 1.0, atol=1e-6):
+        raise ValueError("R must have determinant +1")
+
+    if convention == "camera_in_imu":
+        return R, t
+    if convention == "imu_in_camera":
+        R_ic = R.T
+        t_ic = -(R_ic @ t)
+        return R_ic, t_ic
+    raise ValueError(
+        "convention must be one of "
+        f"{VALID_CAMERA_EXTRINSICS_CONVENTIONS}"
+    )
+
+
 class StateServer:
-    def __init__(self, R_IC=None, t_IC=None):
+    def __init__(self, R_IC=None, t_IC=None, camera_extrinsics_convention="camera_in_imu"):
         self.state = State(timestamp=0.0)
         
         # Euroc V1_01_easy cam0 to imu0 extrinsics (Default fallback)
@@ -17,6 +62,7 @@ class StateServer:
         self.set_camera_extrinsics(
             default_R_IC if R_IC is None else R_IC,
             default_t_IC if t_IC is None else t_IC,
+            convention=camera_extrinsics_convention,
         )
         
         # Covariance matrix P
@@ -37,22 +83,22 @@ class StateServer:
         # Concurrency Lock
         self.lock = threading.RLock()
 
-    def set_camera_extrinsics(self, R_IC, t_IC) -> None:
-        R_IC = np.asarray(R_IC, dtype=np.float64)
-        t_IC = np.asarray(t_IC, dtype=np.float64)
-
-        if R_IC.shape != (3, 3):
-            raise ValueError("R_IC must be a 3x3 rotation matrix")
-        if t_IC.shape != (3,):
-            raise ValueError("t_IC must be a 3-vector")
-
-        if not np.allclose(R_IC.T @ R_IC, np.eye(3), atol=1e-6):
-            raise ValueError("R_IC must be orthonormal")
-        if not np.isclose(np.linalg.det(R_IC), 1.0, atol=1e-6):
-            raise ValueError("R_IC must have determinant +1")
-
-        self.R_IC = R_IC
-        self.t_IC = t_IC
+    def set_camera_extrinsics(
+        self,
+        R_IC,
+        t_IC,
+        *,
+        convention: str = "camera_in_imu",
+    ) -> None:
+        canonical_R_IC, canonical_t_IC = canonicalize_camera_extrinsics(
+            R_IC,
+            t_IC,
+            convention=convention,
+        )
+        self.R_IC = canonical_R_IC
+        self.t_IC = canonical_t_IC
+        self.camera_extrinsics_convention = "camera_in_imu"
+        self.input_camera_extrinsics_convention = convention
         
     def add_clone(self, timestamp: float, position: np.ndarray, quaternion: np.ndarray):
         """
@@ -119,3 +165,8 @@ class StateServer:
         
         # Slice the covariance matrix to drop rows and columns 15:20
         self.covariance = P[np.ix_(indices_to_keep, indices_to_keep)]
+
+    def clear_clones(self):
+        """Drop all camera clones and shrink covariance back to the IMU state."""
+        self.state.clone_poses.clear()
+        self.covariance = self.covariance[:15, :15].copy()

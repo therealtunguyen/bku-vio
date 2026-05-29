@@ -255,3 +255,9 @@ class FeatureManager:
         fid = self.next_feature_id
         self.next_feature_id += 1
         return fid
+
+    def reset(self) -> None:
+        """Clear temporal frontend state after a sensor timestamp discontinuity."""
+        self.active_tracks.clear()
+        self.mature_tracks.clear()
+        self._prev_image = None

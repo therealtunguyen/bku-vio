@@ -14,7 +14,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from vio_pkg.backend.math_utils import skew_symmetric
 from vio_pkg.backend.msckf_updater import MSCKFUpdater
-from vio_pkg.backend.state_server import StateServer
+from vio_pkg.backend.state_server import (
+    StateServer,
+    canonicalize_camera_extrinsics,
+)
 from vio_pkg.utils.common import CameraPose, FeatureTrack
 
 
@@ -203,6 +206,55 @@ def test_state_server_camera_extrinsics_can_be_configured_for_hcmut_bag():
     assert np.allclose(server.t_IC, t_ic)
 
 
+def test_state_server_can_canonicalize_imu_in_camera_extrinsics():
+    r_ic = np.array([
+        [2.033476571297e-03, 1.534356741860e-04, 9.999979207131e-01],
+        [-9.999966540050e-01, -1.598738420073e-03, 2.033719299488e-03],
+        [1.599047140929e-03, -9.999987102456e-01, 1.501841636702e-04],
+    ])
+    t_ic = np.array([0.015779949041, -0.028793809935, -0.007352355558])
+    r_ci = r_ic.T
+    t_ci = -(r_ci @ t_ic)
+
+    canonical_r_ic, canonical_t_ic = canonicalize_camera_extrinsics(
+        r_ci,
+        t_ci,
+        convention="imu_in_camera",
+    )
+
+    assert np.allclose(canonical_r_ic, r_ic)
+    assert np.allclose(canonical_t_ic, t_ic)
+
+
+def test_add_clone_matches_between_equivalent_extrinsics_conventions():
+    r_ic = np.array([
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    t_ic = np.array([0.2, -0.1, 0.05])
+    r_ci = r_ic.T
+    t_ci = -(r_ci @ t_ic)
+    position = np.array([1.0, 2.0, 3.0])
+    quaternion = np.array([1.0, 0.0, 0.0, 0.0])
+
+    server_ic = StateServer(R_IC=r_ic, t_IC=t_ic)
+    server_ci = StateServer(
+        R_IC=r_ci,
+        t_IC=t_ci,
+        camera_extrinsics_convention="imu_in_camera",
+    )
+    server_ic.add_clone(1.0, position, quaternion)
+    server_ci.add_clone(1.0, position, quaternion)
+
+    clone_ic = server_ic.state.clone_poses[-1]
+    clone_ci = server_ci.state.clone_poses[-1]
+
+    assert np.allclose(clone_ic.position, clone_ci.position)
+    assert np.allclose(clone_ic.quaternion, clone_ci.quaternion)
+    assert np.allclose(server_ic.covariance, server_ci.covariance)
+
+
 def test_msckf_rejects_features_when_required_clone_was_marginalized():
     server = _make_server()
     updater = MSCKFUpdater(server)
@@ -240,5 +292,7 @@ if __name__ == "__main__":
     test_msckf_undistorts_euroc_observations_before_triangulation()
     test_msckf_camera_calibration_can_be_configured_for_hcmut_bag()
     test_state_server_camera_extrinsics_can_be_configured_for_hcmut_bag()
+    test_state_server_can_canonicalize_imu_in_camera_extrinsics()
+    test_add_clone_matches_between_equivalent_extrinsics_conventions()
     test_msckf_rejects_features_when_required_clone_was_marginalized()
     print("Backend consistency tests passed.")
