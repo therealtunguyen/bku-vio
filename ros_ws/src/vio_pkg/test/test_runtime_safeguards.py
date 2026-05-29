@@ -33,6 +33,8 @@ from test_hcmut_propagation_replay import (
     DEFAULT_CAMERA_EXTRINSICS_CONVENTION,
     DEFAULT_CAMERA_R_IC,
     DEFAULT_CAMERA_T_IC,
+    DEFAULT_MAX_BATCH_DX_BIAS_NORM,
+    DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG,
 )
 
 
@@ -105,7 +107,7 @@ def test_effective_camera_calibration_scales_intrinsics_not_distortion():
     assert np.allclose(effective_distortion, distortion)
 
 
-def test_hcmut_replay_defaults_match_corrected_runtime_extrinsics():
+def test_hcmut_replay_defaults_match_corrected_runtime_preset():
     expected_r_ic = np.array([
         [0.999996654005, 0.00159873842, -0.002033719299],
         [-0.001599047141, 0.999998710246, -0.000150184164],
@@ -116,6 +118,25 @@ def test_hcmut_replay_defaults_match_corrected_runtime_extrinsics():
     assert DEFAULT_CAMERA_EXTRINSICS_CONVENTION == "camera_in_imu"
     assert np.allclose(np.array(DEFAULT_CAMERA_R_IC).reshape(3, 3), expected_r_ic)
     assert np.allclose(np.array(DEFAULT_CAMERA_T_IC), expected_t_ic)
+    assert DEFAULT_MAX_BATCH_DX_BIAS_NORM == 0.06
+    assert DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG == 2.0
+
+
+def test_hcmut_launch_preset_uses_same_bias_rail_as_replay_default():
+    launch_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "launch",
+        "vio_hcmut.launch.py",
+    )
+    with open(launch_path, "r", encoding="utf-8") as handle:
+        launch_text = handle.read()
+
+    assert f'"max_batch_dx_bias_norm": {DEFAULT_MAX_BATCH_DX_BIAS_NORM}' in launch_text
+    assert (
+        f'"min_triangulation_parallax_deg": '
+        f"{DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG}"
+    ) in launch_text
 
 
 def test_imu_propagator_skips_unreasonably_large_dt_discontinuity():

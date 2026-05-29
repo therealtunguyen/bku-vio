@@ -111,6 +111,8 @@ DEFAULT_CAMERA_T_IC = (
     0.007352355558,
     0.015779949041,
 )
+DEFAULT_MAX_BATCH_DX_BIAS_NORM = 0.06
+DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG = 2.0
 
 
 @dataclass(frozen=True)
@@ -387,6 +389,7 @@ class MsckfReplay(PropagationReplay):
         camera_extrinsics_convention: str,
         camera_R_IC: np.ndarray,
         camera_t_IC: np.ndarray,
+        min_triangulation_parallax_deg: float,
         max_batch_dx_pos_norm: float,
         max_batch_dx_vel_norm: float,
         max_batch_dx_bias_norm: float,
@@ -415,6 +418,9 @@ class MsckfReplay(PropagationReplay):
         self.msckf_updater.max_batch_dx_pos_norm = float(max_batch_dx_pos_norm)
         self.msckf_updater.max_batch_dx_vel_norm = float(max_batch_dx_vel_norm)
         self.msckf_updater.max_batch_dx_bias_norm = float(max_batch_dx_bias_norm)
+        self.msckf_updater.min_triangulation_parallax_deg = float(
+            min_triangulation_parallax_deg
+        )
         self.msckf_updater.collect_feature_diagnostics = bool(
             collect_feature_diagnostics
         )
@@ -456,6 +462,7 @@ class MsckfReplay(PropagationReplay):
         camera_extrinsics_convention: str,
         camera_R_IC: np.ndarray,
         camera_t_IC: np.ndarray,
+        min_triangulation_parallax_deg: float,
         max_batch_dx_pos_norm: float,
         max_batch_dx_vel_norm: float,
         max_batch_dx_bias_norm: float,
@@ -475,6 +482,7 @@ class MsckfReplay(PropagationReplay):
             camera_extrinsics_convention=camera_extrinsics_convention,
             camera_R_IC=camera_R_IC,
             camera_t_IC=camera_t_IC,
+            min_triangulation_parallax_deg=min_triangulation_parallax_deg,
             max_batch_dx_pos_norm=max_batch_dx_pos_norm,
             max_batch_dx_vel_norm=max_batch_dx_vel_norm,
             max_batch_dx_bias_norm=max_batch_dx_bias_norm,
@@ -487,6 +495,9 @@ class MsckfReplay(PropagationReplay):
         replay.msckf_updater.max_batch_dx_pos_norm = float(max_batch_dx_pos_norm)
         replay.msckf_updater.max_batch_dx_vel_norm = float(max_batch_dx_vel_norm)
         replay.msckf_updater.max_batch_dx_bias_norm = float(max_batch_dx_bias_norm)
+        replay.msckf_updater.min_triangulation_parallax_deg = float(
+            min_triangulation_parallax_deg
+        )
         replay.msckf_updater.collect_feature_diagnostics = bool(
             snapshot.extra.get(
                 "collect_feature_diagnostics",
@@ -1330,7 +1341,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-batch-dx-pos-norm", type=float, default=0.5)
     parser.add_argument("--max-batch-dx-vel-norm", type=float, default=1.0)
-    parser.add_argument("--max-batch-dx-bias-norm", type=float, default=0.03)
+    parser.add_argument(
+        "--max-batch-dx-bias-norm",
+        type=float,
+        default=DEFAULT_MAX_BATCH_DX_BIAS_NORM,
+    )
+    parser.add_argument(
+        "--min-triangulation-parallax-deg",
+        type=float,
+        default=DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG,
+    )
     parser.add_argument("--report-window-start", type=int, default=150)
     parser.add_argument("--report-window-stop", type=int, default=220)
     parser.add_argument("--report-every", type=int, default=10)
@@ -1395,6 +1415,7 @@ def main() -> int:
             camera_extrinsics_convention=args.camera_extrinsics_convention,
             camera_R_IC=camera_R_IC,
             camera_t_IC=camera_t_IC,
+            min_triangulation_parallax_deg=args.min_triangulation_parallax_deg,
             max_batch_dx_pos_norm=args.max_batch_dx_pos_norm,
             max_batch_dx_vel_norm=args.max_batch_dx_vel_norm,
             max_batch_dx_bias_norm=args.max_batch_dx_bias_norm,
@@ -1428,6 +1449,7 @@ def main() -> int:
             camera_extrinsics_convention=args.camera_extrinsics_convention,
             camera_R_IC=camera_R_IC,
             camera_t_IC=camera_t_IC,
+            min_triangulation_parallax_deg=args.min_triangulation_parallax_deg,
             max_batch_dx_pos_norm=args.max_batch_dx_pos_norm,
             max_batch_dx_vel_norm=args.max_batch_dx_vel_norm,
             max_batch_dx_bias_norm=args.max_batch_dx_bias_norm,
@@ -1527,6 +1549,7 @@ def main() -> int:
                     camera_extrinsics_convention=convention,
                     camera_R_IC=sweep_R_IC,
                     camera_t_IC=sweep_t_IC,
+                    min_triangulation_parallax_deg=args.min_triangulation_parallax_deg,
                     max_batch_dx_pos_norm=args.max_batch_dx_pos_norm,
                     max_batch_dx_vel_norm=args.max_batch_dx_vel_norm,
                     max_batch_dx_bias_norm=args.max_batch_dx_bias_norm,

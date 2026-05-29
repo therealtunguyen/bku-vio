@@ -20,6 +20,7 @@ class MSCKFUpdater:
         self.last_innovation_condition_number = 0.0
         self.last_dx_bg_norm = 0.0
         self.collect_feature_diagnostics = False
+        self.min_triangulation_parallax_deg = 0.0
 
         # Runtime safety rails. These are intentionally conservative because a
         # single bad visual batch can destroy the inertial state.
@@ -53,15 +54,16 @@ class MSCKFUpdater:
             return None
 
         normalized_observations = self._normalize_observations(feature.observations)
-        camera_positions = [cam_pose.position for _, cam_pose in clone_sequence]
-        ray_directions = []
+        _, _, max_baseline, max_parallax_deg = self._compute_track_geometry(
+            clone_sequence,
+            normalized_observations,
+        )
         reprojection_errors = []
 
         for obs_norm, (_, cam_pose) in zip(normalized_observations, clone_sequence):
             bearing_cam = np.array([obs_norm[0], obs_norm[1], 1.0], dtype=np.float64)
             bearing_cam /= np.linalg.norm(bearing_cam)
             R_wc = quaternion_to_matrix(cam_pose.quaternion)
-            ray_directions.append(R_wc @ bearing_cam)
 
             p_c = R_wc.T @ (feature_3d - cam_pose.position)
             if p_c[2] < 1e-3:
@@ -72,6 +74,26 @@ class MSCKFUpdater:
                     np.linalg.norm(pred_norm - obs_norm) * 0.5 * (self.fx + self.fy)
                 )
             )
+
+        return {
+            "track_length": float(len(feature.observations)),
+            "max_baseline": max_baseline,
+            "max_parallax_deg": max_parallax_deg,
+            "mean_reprojection_px": float(np.mean(reprojection_errors)),
+        }
+
+    def _compute_track_geometry(
+        self,
+        clone_sequence,
+        normalized_observations: np.ndarray,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], float, float]:
+        camera_positions = [cam_pose.position for _, cam_pose in clone_sequence]
+        ray_directions = []
+        for obs_norm, (_, cam_pose) in zip(normalized_observations, clone_sequence):
+            bearing_cam = np.array([obs_norm[0], obs_norm[1], 1.0], dtype=np.float64)
+            bearing_cam /= np.linalg.norm(bearing_cam)
+            R_wc = quaternion_to_matrix(cam_pose.quaternion)
+            ray_directions.append(R_wc @ bearing_cam)
 
         max_baseline = 0.0
         for i in range(len(camera_positions)):
@@ -92,12 +114,7 @@ class MSCKFUpdater:
                     float(np.degrees(np.arccos(dot))),
                 )
 
-        return {
-            "track_length": float(len(feature.observations)),
-            "max_baseline": max_baseline,
-            "max_parallax_deg": max_parallax_deg,
-            "mean_reprojection_px": float(np.mean(reprojection_errors)),
-        }
+        return camera_positions, ray_directions, max_baseline, max_parallax_deg
 
     def set_camera_calibration(
         self,
@@ -275,6 +292,12 @@ class MSCKFUpdater:
         if clone_sequence is None:
             return None
         normalized_observations = self._normalize_observations(feature.observations)
+        _, _, _, max_parallax_deg = self._compute_track_geometry(
+            clone_sequence,
+            normalized_observations,
+        )
+        if max_parallax_deg < self.min_triangulation_parallax_deg:
+            return None
 
         for obs_norm, (_, cam_pose) in zip(normalized_observations, clone_sequence):
             R_wc = quaternion_to_matrix(cam_pose.quaternion)

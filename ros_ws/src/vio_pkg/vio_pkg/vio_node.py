@@ -235,6 +235,10 @@ class VIOSystemNode(Node):
         self.declare_parameter('max_imu_init_gap', 0.1)
         self.declare_parameter('max_frame_timestamp_gap', 0.1)
         self.declare_parameter('reset_on_large_frame_gap', False)
+        self.declare_parameter(
+            'min_triangulation_parallax_deg',
+            0.0,
+        )
         self.image_processing_width = (
             self.get_parameter('image_processing_width')
             .get_parameter_value()
@@ -359,6 +363,11 @@ class VIOSystemNode(Node):
             .get_parameter_value()
             .double_value
         )
+        self.msckf_updater.min_triangulation_parallax_deg = (
+            self.get_parameter('min_triangulation_parallax_deg')
+            .get_parameter_value()
+            .double_value
+        )
         if self.msckf_updater.max_batch_dx_pos_norm <= 0.0:
             self.get_logger().warn(
                 "max_batch_dx_pos_norm must be > 0; falling back to 0.5"
@@ -374,6 +383,11 @@ class VIOSystemNode(Node):
                 "max_batch_dx_bias_norm must be > 0; falling back to 0.25"
             )
             self.msckf_updater.max_batch_dx_bias_norm = 0.25
+        if self.msckf_updater.min_triangulation_parallax_deg < 0.0:
+            self.get_logger().warn(
+                "min_triangulation_parallax_deg must be >= 0; falling back to 0.0"
+            )
+            self.msckf_updater.min_triangulation_parallax_deg = 0.0
 
         self.declare_parameter(
             'camera_R_IC',
@@ -468,7 +482,9 @@ class VIOSystemNode(Node):
             f"max_imu_dt={self.imu_propagator.max_imu_dt:.4f}, "
             f"max_dx_pos={self.msckf_updater.max_batch_dx_pos_norm:.4f}, "
             f"max_dx_vel={self.msckf_updater.max_batch_dx_vel_norm:.4f}, "
-            f"max_dx_bias={self.msckf_updater.max_batch_dx_bias_norm:.4f}"
+            f"max_dx_bias={self.msckf_updater.max_batch_dx_bias_norm:.4f}, "
+            "min_triangulation_parallax_deg="
+            f"{self.msckf_updater.min_triangulation_parallax_deg:.4f}"
         )
         self.images_received = 0
         self.images_enqueued = 0

@@ -132,7 +132,7 @@ There are two test scripts in `ros_ws/src/vio_pkg/test/`:
 | `test_frontend_dataset.py` | Real EuRoC frames from the bag | Yes (container only) |
 
 The teammate RGB-only bags under `dataset/ROSBAG_17_4_2026/` can be useful for
-visual frontend, ArUco, and demo checks. They do not contain IMU data, so do not
+visual frontend and demo checks. They do not contain IMU data, so do not
 use them as full VIO accuracy runs.
 
 ---

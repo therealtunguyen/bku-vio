@@ -14,6 +14,7 @@
 ## 0. Trạng thái hiện tại
 
 - M4 MSCKF measurement update đã hoàn thành trên EuRoC `V1_01_easy`.
+- Project scope hiện là pure VIO/MSCKF; không còn nhánh ArUco trong kế hoạch.
 - Launch mặc định vẫn chạy EuRoC với calibration EuRoC:
   - Intrinsics/distortion mặc định nằm trong `backend/msckf_updater.py`.
   - IMU-camera extrinsics mặc định nằm trong `backend/state_server.py`.
@@ -218,7 +219,8 @@ ros2 run vio_pkg vio_system_node --ros-args \
   -p publish_debug_image:=false \
   -p log_tracked_frames:=false \
   -p max_imu_dt:=0.05 \
-  -p max_batch_dx_bias_norm:=0.03 \
+  -p max_batch_dx_bias_norm:=0.06 \
+  -p min_triangulation_parallax_deg:=2.0 \
   -p max_imu_init_gap:=0.2 \
   -p max_frame_timestamp_gap:=0.25 \
   -p camera_fx:=646.33728 \

@@ -62,7 +62,14 @@ def generate_launch_description():
                         "publish_debug_image": False,
                         "log_tracked_frames": False,
                         "max_imu_dt": 0.05,
-                        "max_batch_dx_bias_norm": 0.03,
+                        # Deterministic replay shows frame-200 needs a small
+                        # bias-rail lift; 0.06 is the smallest value that
+                        # consistently accepts that batch.
+                        "max_batch_dx_bias_norm": 0.06,
+                        # Late-window HCMUT drift is dominated by weak-geometry
+                        # tracks; 2.0 deg is the smallest parallax floor that
+                        # materially reduces the deterministic late peak.
+                        "min_triangulation_parallax_deg": 2.0,
                         "max_imu_init_gap": 0.2,
                         "max_frame_timestamp_gap": 0.25,
                         "reset_on_large_frame_gap": True,

@@ -17,7 +17,7 @@ Tự implement lõi (core) toán học và Computer Vision vào khung (skeleton)
   - -> Output: Sinh ra tập điểm theo dõi bền bỉ để chuyển đi (`MatureFeatures`).
 - **Phase 3 (IMU Propagation - File `backend/propagator.py`):** Cài đặt tích phân Kinematics RK4 để nhích (predict) Trạng thái Tương lai của Vị trí, Vận tốc, Sai số (Bias) và sinh ma trận hiệp phương sai Covariance.
 - **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch. Phase này đã hoàn thành cho EuRoC `V1_01_easy`; hệ thống đạt mục tiêu ATE RMSE < 1.0 m khi đánh giá bằng `evo` với SE(3) alignment, không scale correction.
-- **Phase 5 (ArUco Integration):** Đang bắt đầu. Mọi thay đổi ArUco phải nằm sau flag riêng để không làm thay đổi baseline M4 trên EuRoC.
+- **Phase 5 (Pure VIO Hardening):** Khóa scope về pure VIO/MSCKF. Trọng tâm là giữ baseline EuRoC M4 reproducible, tăng độ ổn định runtime, và debug path HCMUT/D455 như smoke test mà không tạo estimator mode mới.
 
 ## 3. Cách Thiết Kế (Architecture & Design Pattern)
 
@@ -86,7 +86,7 @@ dễ diverge dù image tracking vẫn chạy.
 
 Dataset HCMUT/D455 hiện dùng được như smoke test, chưa dùng làm accuracy result:
 
-- RGB-only bags: dùng cho frontend/ArUco/demo, không đủ IMU để chạy VIO đầy đủ.
+- RGB-only bags: dùng cho frontend/demo, không đủ IMU để chạy VIO đầy đủ.
 - `vio_hcmut_dataset`: có color image và IMU, chạy được full VIO smoke test với
   intrinsics D455 và extrinsics lấy từ `tf_static`, nhưng chưa nên dùng làm
   metric-accuracy result.

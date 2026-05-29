@@ -158,6 +158,52 @@ def test_msckf_undistorts_euroc_observations_before_triangulation():
     assert np.linalg.norm(residual) < 1e-6
 
 
+def test_msckf_can_reject_low_parallax_tracks_before_triangulation():
+    server = _make_server()
+    updater = MSCKFUpdater(server)
+    updater.distortion_coefficients = np.zeros(4)
+    updater.min_triangulation_parallax_deg = 2.0
+
+    timestamps = [1.0, 2.0, 3.0]
+    positions = [
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.1, 0.0, 0.0]),
+        np.array([0.2, 0.0, 0.0]),
+    ]
+    for timestamp, position in zip(timestamps, positions):
+        _add_identity_clone(server, timestamp, position)
+
+    low_parallax_point_w = np.array([0.3, 0.0, 25.0])
+    low_parallax_feature = FeatureTrack(
+        feature_id=30,
+        observations=[
+            _project(updater, low_parallax_point_w, position)
+            for position in positions
+        ],
+        camera_states=[
+            CameraPose(timestamp, position, np.array([1.0, 0.0, 0.0, 0.0]))
+            for timestamp, position in zip(timestamps, positions)
+        ],
+    )
+    assert updater.triangulate_feature(low_parallax_feature) is None
+
+    high_parallax_point_w = np.array([0.3, 0.0, 5.0])
+    high_parallax_feature = FeatureTrack(
+        feature_id=31,
+        observations=[
+            _project(updater, high_parallax_point_w, position)
+            for position in positions
+        ],
+        camera_states=[
+            CameraPose(timestamp, position, np.array([1.0, 0.0, 0.0, 0.0]))
+            for timestamp, position in zip(timestamps, positions)
+        ],
+    )
+    triangulated = updater.triangulate_feature(high_parallax_feature)
+    assert triangulated is not None
+    assert np.allclose(triangulated, high_parallax_point_w, atol=1e-6)
+
+
 def test_msckf_camera_calibration_can_be_configured_for_hcmut_bag():
     server = _make_server()
     updater = MSCKFUpdater(server)
@@ -366,6 +412,7 @@ if __name__ == "__main__":
     test_clone_augmentation_keeps_lever_arm_orientation_coupling()
     test_msckf_uses_authoritative_state_server_clones_not_frontend_snapshots()
     test_msckf_undistorts_euroc_observations_before_triangulation()
+    test_msckf_can_reject_low_parallax_tracks_before_triangulation()
     test_msckf_camera_calibration_can_be_configured_for_hcmut_bag()
     test_state_server_camera_extrinsics_can_be_configured_for_hcmut_bag()
     test_state_server_can_canonicalize_imu_in_camera_extrinsics()
