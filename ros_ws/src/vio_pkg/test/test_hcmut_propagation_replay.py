@@ -96,20 +96,20 @@ DEFAULT_CAMERA_DISTORTION = (
     -0.021141313016414642,
 )
 DEFAULT_CAMERA_R_IC = (
-    0.002033476571297,
-    0.000153435674186,
-    0.9999979207131,
-    -0.999996654005,
-    -0.001598738420073,
-    0.002033719299488,
-    0.001599047140929,
-    -0.9999987102456,
-    0.0001501841636702,
+    0.999996654005,
+    0.00159873842,
+    -0.002033719299,
+    -0.001599047141,
+    0.999998710246,
+    -0.000150184164,
+    0.002033476571,
+    0.000153435674,
+    0.999997920713,
 )
 DEFAULT_CAMERA_T_IC = (
+    0.028793809935,
+    0.007352355558,
     0.015779949041,
-    -0.028793809935,
-    -0.007352355558,
 )
 
 
@@ -150,10 +150,14 @@ class FrameMetric:
     tri_fail_mean_parallax_deg: float = 0.0
     tri_fail_mean_reprojection_px: float = 0.0
     msckf_batch_rejected: int = 0
+    msckf_dx_pos_norm: float = 0.0
     msckf_dx_vel_norm: float = 0.0
     msckf_dx_bg_norm: float = 0.0
     msckf_dx_ba_norm: float = 0.0
     msckf_innovation_condition_number: float = 0.0
+    accepted_track_diagnostics: list[dict[str, float | int]] = field(
+        default_factory=list
+    )
 
 
 @dataclass
@@ -605,11 +609,15 @@ class MsckfReplay(PropagationReplay):
                 triangulation_summary["mean_reprojection_px"]
             ),
             msckf_batch_rejected=int(update_stats.get("batch_rejected", 0)),
+            msckf_dx_pos_norm=float(update_stats.get("dx_pos_norm", 0.0)),
             msckf_dx_vel_norm=float(update_stats.get("dx_vel_norm", 0.0)),
             msckf_dx_bg_norm=float(update_stats.get("dx_bg_norm", 0.0)),
             msckf_dx_ba_norm=float(update_stats.get("dx_accel_bias_norm", 0.0)),
             msckf_innovation_condition_number=float(
                 update_stats.get("innovation_condition_number", 0.0)
+            ),
+            accepted_track_diagnostics=list(
+                update_stats.get("accepted_track_diagnostics", [])
             ),
         )
 
@@ -1035,10 +1043,66 @@ def _print_window_report(
             f"tri_fail_parallax_deg={metric.tri_fail_mean_parallax_deg:.3f} "
             f"tri_fail_reproj_px={metric.tri_fail_mean_reprojection_px:.3f} "
             f"batch_rejected={metric.msckf_batch_rejected} "
+            f"dx_pos={metric.msckf_dx_pos_norm:.3e} "
             f"dx_vel={metric.msckf_dx_vel_norm:.3e} "
             f"dx_bg={metric.msckf_dx_bg_norm:.3e} "
             f"dx_ba={metric.msckf_dx_ba_norm:.3e} "
             f"innovation_cond={metric.msckf_innovation_condition_number:.3e}"
+        )
+
+
+def _print_accepted_track_report(
+    metrics: list[FrameMetric],
+    *,
+    start_frame: int,
+    stop_frame: int,
+    every_n: int,
+    limit: int,
+) -> None:
+    window = [
+        metric
+        for metric in metrics
+        if start_frame <= metric.processed_frame <= stop_frame
+        and (metric.processed_frame - start_frame) % every_n == 0
+    ]
+    if not window:
+        print(
+            f"\naccepted_track_report=missing start_frame={start_frame} stop_frame={stop_frame}"
+        )
+        return
+
+    print(
+        f"\n=== ACCEPTED TRACK REPORT frames {start_frame}-{stop_frame} step {every_n} ==="
+    )
+    for metric in window:
+        tracks = sorted(
+            metric.accepted_track_diagnostics,
+            key=lambda item: (
+                -int(item.get("accepted_rows", 0)),
+                -float(item.get("pre_gating_residual_norm", 0.0)),
+            ),
+        )
+        if not tracks:
+            print(f"frame={metric.processed_frame} accepted_tracks=none")
+            continue
+
+        chunks = []
+        for track in tracks[:limit]:
+            chunks.append(
+                "id="
+                f"{int(track.get('feature_id', -1))} "
+                f"len={int(track.get('track_length', 0))} "
+                f"rows={int(track.get('accepted_rows', 0))} "
+                f"residual={float(track.get('pre_gating_residual_norm', 0.0)):.3e} "
+                f"baseline={float(track.get('max_baseline', 0.0)):.4f} "
+                f"parallax_deg={float(track.get('max_parallax_deg', 0.0)):.3f} "
+                f"reproj_px={float(track.get('mean_reprojection_px', 0.0)):.3f}"
+            )
+        print(
+            "frame="
+            f"{metric.processed_frame} "
+            f"accepted_track_count={len(metric.accepted_track_diagnostics)} "
+            + " | ".join(chunks)
         )
 
 
@@ -1256,6 +1320,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-window-stop", type=int, default=220)
     parser.add_argument("--report-every", type=int, default=10)
     parser.add_argument("--report-optical-flow", action="store_true")
+    parser.add_argument("--report-accepted-tracks", action="store_true")
+    parser.add_argument("--accepted-track-limit", type=int, default=3)
     return parser.parse_args()
 
 
@@ -1376,6 +1442,14 @@ def main() -> int:
             start_frame=args.report_window_start,
             stop_frame=args.report_window_stop,
             every_n=args.report_every,
+        )
+    if args.report_accepted_tracks:
+        _print_accepted_track_report(
+            full_metrics,
+            start_frame=args.report_window_start,
+            stop_frame=args.report_window_stop,
+            every_n=args.report_every,
+            limit=max(1, args.accepted_track_limit),
         )
 
     full_discontinuities = max(

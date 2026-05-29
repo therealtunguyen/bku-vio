@@ -42,6 +42,62 @@ class MSCKFUpdater:
             ],
         )
 
+    def _compute_feature_geometry_stats(
+        self,
+        feature_3d: np.ndarray,
+        feature: FeatureTrack,
+    ) -> dict[str, float] | None:
+        clone_sequence = self._get_clone_sequence(feature)
+        if clone_sequence is None:
+            return None
+
+        normalized_observations = self._normalize_observations(feature.observations)
+        camera_positions = [cam_pose.position for _, cam_pose in clone_sequence]
+        ray_directions = []
+        reprojection_errors = []
+
+        for obs_norm, (_, cam_pose) in zip(normalized_observations, clone_sequence):
+            bearing_cam = np.array([obs_norm[0], obs_norm[1], 1.0], dtype=np.float64)
+            bearing_cam /= np.linalg.norm(bearing_cam)
+            R_wc = quaternion_to_matrix(cam_pose.quaternion)
+            ray_directions.append(R_wc @ bearing_cam)
+
+            p_c = R_wc.T @ (feature_3d - cam_pose.position)
+            if p_c[2] < 1e-3:
+                return None
+            pred_norm = np.array([p_c[0] / p_c[2], p_c[1] / p_c[2]], dtype=np.float64)
+            reprojection_errors.append(
+                float(
+                    np.linalg.norm(pred_norm - obs_norm) * 0.5 * (self.fx + self.fy)
+                )
+            )
+
+        max_baseline = 0.0
+        for i in range(len(camera_positions)):
+            for j in range(i + 1, len(camera_positions)):
+                max_baseline = max(
+                    max_baseline,
+                    float(np.linalg.norm(camera_positions[j] - camera_positions[i])),
+                )
+
+        max_parallax_deg = 0.0
+        for i in range(len(ray_directions)):
+            for j in range(i + 1, len(ray_directions)):
+                dot = float(
+                    np.clip(np.dot(ray_directions[i], ray_directions[j]), -1.0, 1.0)
+                )
+                max_parallax_deg = max(
+                    max_parallax_deg,
+                    float(np.degrees(np.arccos(dot))),
+                )
+
+        return {
+            "track_length": float(len(feature.observations)),
+            "max_baseline": max_baseline,
+            "max_parallax_deg": max_parallax_deg,
+            "mean_reprojection_px": float(np.mean(reprojection_errors)),
+        }
+
     def set_camera_calibration(
         self,
         fx: float,
@@ -135,6 +191,7 @@ class MSCKFUpdater:
             "rejected_unreasonable_dx": 0,
             "innovation_condition_number": 0.0,
             "skipped": 0,
+            "accepted_track_diagnostics": [],
         }
 
         if not mature_features:
@@ -163,10 +220,22 @@ class MSCKFUpdater:
             H_xo, r_o = self.null_space_projection(H_x, H_f, r)
             if H_xo is not None and r_o is not None:
                 if self._gating_test(H_xo, r_o):
+                    geometry_stats = self._compute_feature_geometry_stats(
+                        feature_3d,
+                        feature,
+                    )
                     H_stacked.append(H_xo)
                     r_stacked.append(r_o)
                     stats["accepted"] += 1
                     stats["rows"] += H_xo.shape[0]
+                    diagnostic = {
+                        "feature_id": int(feature.feature_id),
+                        "accepted_rows": int(H_xo.shape[0]),
+                        "pre_gating_residual_norm": float(np.linalg.norm(r_o)),
+                    }
+                    if geometry_stats is not None:
+                        diagnostic.update(geometry_stats)
+                    stats["accepted_track_diagnostics"].append(diagnostic)
                 else:
                     stats["gated_out"] += 1
 

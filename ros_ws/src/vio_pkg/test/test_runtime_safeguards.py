@@ -29,6 +29,11 @@ from vio_pkg.vio_node import (
     sanitize_time_gap_threshold,
     update_initial_imu_buffer,
 )
+from test_hcmut_propagation_replay import (
+    DEFAULT_CAMERA_EXTRINSICS_CONVENTION,
+    DEFAULT_CAMERA_R_IC,
+    DEFAULT_CAMERA_T_IC,
+)
 
 
 def test_put_latest_image_drops_oldest_when_queue_is_full():
@@ -98,6 +103,19 @@ def test_effective_camera_calibration_scales_intrinsics_not_distortion():
     assert np.isclose(cx, 643.358276 * 752.0 / 1280.0)
     assert np.isclose(cy, 362.999176 * 752.0 / 1280.0)
     assert np.allclose(effective_distortion, distortion)
+
+
+def test_hcmut_replay_defaults_match_corrected_runtime_extrinsics():
+    expected_r_ic = np.array([
+        [0.999996654005, 0.00159873842, -0.002033719299],
+        [-0.001599047141, 0.999998710246, -0.000150184164],
+        [0.002033476571, 0.000153435674, 0.999997920713],
+    ])
+    expected_t_ic = np.array([0.028793809935, 0.007352355558, 0.015779949041])
+
+    assert DEFAULT_CAMERA_EXTRINSICS_CONVENTION == "camera_in_imu"
+    assert np.allclose(np.array(DEFAULT_CAMERA_R_IC).reshape(3, 3), expected_r_ic)
+    assert np.allclose(np.array(DEFAULT_CAMERA_T_IC), expected_t_ic)
 
 
 def test_imu_propagator_skips_unreasonably_large_dt_discontinuity():
