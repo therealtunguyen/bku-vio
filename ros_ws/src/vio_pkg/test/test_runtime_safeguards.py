@@ -294,9 +294,8 @@ def test_state_server_rejects_unknown_camera_extrinsics_convention():
         raise AssertionError("Expected ValueError for unknown convention")
 
 
-def test_vio_node_resets_temporal_state_on_frame_timestamp_discontinuity():
-    node = object.__new__(VIOSystemNode)
-    node.frontend = type(
+def _make_dummy_frontend():
+    return type(
         "DummyFrontend",
         (),
         {
@@ -310,22 +309,95 @@ def test_vio_node_resets_temporal_state_on_frame_timestamp_discontinuity():
             ),
         },
     )()
+
+
+def _make_dummy_logger():
+    return type(
+        "DummyLogger",
+        (),
+        {"warn": lambda self, msg: None},
+    )()
+
+
+def test_vio_node_does_not_reset_on_large_forward_gap_when_disabled():
+    node = object.__new__(VIOSystemNode)
+    node.frontend = _make_dummy_frontend()
     node.state_server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
     node.state_server.add_clone(1.0, np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
     node.state_server.state.timestamp = 12.0
     node.last_image_time = 12.0
     node._discontinuity_reset_count = 0
     node.max_frame_timestamp_gap = 0.1
+    node.reset_on_large_frame_gap = False
+    node.imu_lock = threading.Lock()
+    node.imu_buffer = [
+        ImuData(timestamp=12.05, accel=np.zeros(3), gyro=np.zeros(3)),
+        ImuData(timestamp=12.40, accel=np.zeros(3), gyro=np.zeros(3)),
+    ]
+    node.get_logger = lambda: _make_dummy_logger()
+
+    should_reset = VIOSystemNode._should_reset_for_frame_gap(node, 0.2)
+
+    assert should_reset is False
+    assert node.state_server.state.timestamp == 12.0
+    assert len(node.state_server.state.clone_poses) == 1
+    assert [imu.timestamp for imu in node.imu_buffer] == [12.05, 12.40]
+    assert len(node.frontend.active_tracks) == 1
+    assert len(node.frontend.mature_tracks) == 1
+    assert node.frontend._prev_image is not None
+    assert node._discontinuity_reset_count == 0
+
+
+def test_vio_node_resets_on_large_forward_gap_when_enabled():
+    node = object.__new__(VIOSystemNode)
+    node.frontend = _make_dummy_frontend()
+    node.state_server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+    node.state_server.add_clone(1.0, np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    node.state_server.state.timestamp = 12.0
+    node.last_image_time = 12.0
+    node._discontinuity_reset_count = 0
+    node.max_frame_timestamp_gap = 0.1
+    node.reset_on_large_frame_gap = True
+    node.imu_lock = threading.Lock()
+    node.imu_buffer = [
+        ImuData(timestamp=12.05, accel=np.zeros(3), gyro=np.zeros(3)),
+        ImuData(timestamp=12.40, accel=np.zeros(3), gyro=np.zeros(3)),
+    ]
+    node.get_logger = lambda: _make_dummy_logger()
+
+    should_reset = VIOSystemNode._should_reset_for_frame_gap(node, 0.2)
+
+    assert should_reset is True
+
+    VIOSystemNode._handle_frame_timestamp_discontinuity(node, 12.2, 0.2)
+
+    assert node.last_image_time == 12.2
+    assert node.state_server.state.timestamp == 12.2
+    assert node.state_server.state.clone_poses == []
+    assert node.state_server.covariance.shape == (15, 15)
+    assert [imu.timestamp for imu in node.imu_buffer] == [12.40]
+    assert node.frontend.active_tracks == []
+    assert node.frontend.mature_tracks == []
+    assert node.frontend._prev_image is None
+    assert node._discontinuity_reset_count == 1
+
+
+def test_vio_node_resets_temporal_state_on_backward_timestamp_discontinuity():
+    node = object.__new__(VIOSystemNode)
+    node.frontend = _make_dummy_frontend()
+    node.state_server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+    node.state_server.add_clone(1.0, np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    node.state_server.state.timestamp = 12.0
+    node.last_image_time = 12.0
+    node._discontinuity_reset_count = 0
+    node.max_frame_timestamp_gap = 0.1
+    node.reset_on_large_frame_gap = False
     node.imu_lock = threading.Lock()
     node.imu_buffer = [
         ImuData(timestamp=8.5, accel=np.zeros(3), gyro=np.zeros(3)),
         ImuData(timestamp=9.5, accel=np.zeros(3), gyro=np.zeros(3)),
     ]
-    node.get_logger = lambda: type(
-        "DummyLogger",
-        (),
-        {"warn": lambda self, msg: None},
-    )()
+    node.get_logger = lambda: _make_dummy_logger()
 
     VIOSystemNode._handle_frame_timestamp_discontinuity(node, 9.0, -3.0)
 
@@ -359,5 +431,7 @@ if __name__ == "__main__":
     test_frame_timestamp_discontinuity_can_tolerate_brief_frame_drops()
     test_sanitize_time_gap_threshold_falls_back_for_non_positive_values()
     test_state_server_rejects_unknown_camera_extrinsics_convention()
-    test_vio_node_resets_temporal_state_on_frame_timestamp_discontinuity()
+    test_vio_node_does_not_reset_on_large_forward_gap_when_disabled()
+    test_vio_node_resets_on_large_forward_gap_when_enabled()
+    test_vio_node_resets_temporal_state_on_backward_timestamp_discontinuity()
     print("Runtime safeguard tests passed.")

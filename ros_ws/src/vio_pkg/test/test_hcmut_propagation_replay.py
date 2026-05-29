@@ -390,6 +390,7 @@ class MsckfReplay(PropagationReplay):
         max_batch_dx_pos_norm: float,
         max_batch_dx_vel_norm: float,
         max_batch_dx_bias_norm: float,
+        collect_feature_diagnostics: bool = False,
     ):
         super().__init__(
             imu_init_samples=imu_init_samples,
@@ -414,6 +415,9 @@ class MsckfReplay(PropagationReplay):
         self.msckf_updater.max_batch_dx_pos_norm = float(max_batch_dx_pos_norm)
         self.msckf_updater.max_batch_dx_vel_norm = float(max_batch_dx_vel_norm)
         self.msckf_updater.max_batch_dx_bias_norm = float(max_batch_dx_bias_norm)
+        self.msckf_updater.collect_feature_diagnostics = bool(
+            collect_feature_diagnostics
+        )
         self.image_processing_width = int(image_processing_width)
         self.base_camera_fx = float(camera_fx)
         self.base_camera_fy = float(camera_fy)
@@ -428,6 +432,9 @@ class MsckfReplay(PropagationReplay):
         snapshot.extra = {
             "frontend": copy.deepcopy(self.frontend),
             "calibration_scale_applied": self._calibration_scale_applied,
+            "collect_feature_diagnostics": (
+                self.msckf_updater.collect_feature_diagnostics
+            ),
         }
         return snapshot
 
@@ -452,6 +459,7 @@ class MsckfReplay(PropagationReplay):
         max_batch_dx_pos_norm: float,
         max_batch_dx_vel_norm: float,
         max_batch_dx_bias_norm: float,
+        collect_feature_diagnostics: bool = False,
     ) -> "MsckfReplay":
         replay = cls(
             imu_init_samples=imu_init_samples,
@@ -470,6 +478,7 @@ class MsckfReplay(PropagationReplay):
             max_batch_dx_pos_norm=max_batch_dx_pos_norm,
             max_batch_dx_vel_norm=max_batch_dx_vel_norm,
             max_batch_dx_bias_norm=max_batch_dx_bias_norm,
+            collect_feature_diagnostics=collect_feature_diagnostics,
         )
         replay.state_server = snapshot.state_server
         replay.propagator = ImuPropagator(replay.state_server)
@@ -478,6 +487,12 @@ class MsckfReplay(PropagationReplay):
         replay.msckf_updater.max_batch_dx_pos_norm = float(max_batch_dx_pos_norm)
         replay.msckf_updater.max_batch_dx_vel_norm = float(max_batch_dx_vel_norm)
         replay.msckf_updater.max_batch_dx_bias_norm = float(max_batch_dx_bias_norm)
+        replay.msckf_updater.collect_feature_diagnostics = bool(
+            snapshot.extra.get(
+                "collect_feature_diagnostics",
+                collect_feature_diagnostics,
+            )
+        )
         replay.imu_buffer = copy.deepcopy(snapshot.imu_buffer)
         replay.initial_imu_buffer = copy.deepcopy(snapshot.initial_imu_buffer)
         replay.gravity_aligned = snapshot.gravity_aligned
@@ -1383,6 +1398,7 @@ def main() -> int:
             max_batch_dx_pos_norm=args.max_batch_dx_pos_norm,
             max_batch_dx_vel_norm=args.max_batch_dx_vel_norm,
             max_batch_dx_bias_norm=args.max_batch_dx_bias_norm,
+            collect_feature_diagnostics=args.report_accepted_tracks,
         )
     full_metrics, snapshot, snapshot_event_index = _run_replay(
         events,
@@ -1415,6 +1431,7 @@ def main() -> int:
             max_batch_dx_pos_norm=args.max_batch_dx_pos_norm,
             max_batch_dx_vel_norm=args.max_batch_dx_vel_norm,
             max_batch_dx_bias_norm=args.max_batch_dx_bias_norm,
+            collect_feature_diagnostics=args.report_accepted_tracks,
         )
     if args.bias_mode != "baseline":
         _apply_bias_mode(segment_runner, args.bias_mode)

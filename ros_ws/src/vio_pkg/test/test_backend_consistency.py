@@ -286,9 +286,43 @@ def test_msckf_rejects_features_when_required_clone_was_marginalized():
     assert residual is None
 
 
-def test_msckf_update_stats_include_accepted_track_diagnostics():
+def test_msckf_update_stats_leave_accepted_track_diagnostics_disabled_by_default():
     server = _make_server()
     updater = MSCKFUpdater(server)
+    updater.distortion_coefficients = np.zeros(4)
+    point_w = np.array([0.4, -0.1, 4.5])
+
+    timestamps = [1.0, 2.0, 3.0, 4.0]
+    positions = [
+        np.array([0.0, 0.0, 0.0]),
+        np.array([0.2, 0.0, 0.0]),
+        np.array([0.4, 0.0, 0.0]),
+        np.array([0.6, 0.0, 0.0]),
+    ]
+    for timestamp, position in zip(timestamps, positions):
+        _add_identity_clone(server, timestamp, position)
+
+    feature = FeatureTrack(
+        feature_id=7,
+        observations=[_project(updater, point_w, position) for position in positions],
+        camera_states=[
+            CameraPose(timestamp, position, np.array([1.0, 0.0, 0.0, 0.0]))
+            for timestamp, position in zip(timestamps, positions)
+        ],
+    )
+
+    updater.process_mature_features([feature])
+
+    stats = updater.last_update_stats
+    assert stats["accepted"] == 1
+    assert stats["rows"] > 0
+    assert stats["accepted_track_diagnostics"] == []
+
+
+def test_msckf_can_collect_accepted_track_diagnostics_when_enabled():
+    server = _make_server()
+    updater = MSCKFUpdater(server)
+    updater.collect_feature_diagnostics = True
     updater.distortion_coefficients = np.zeros(4)
     point_w = np.array([0.4, -0.1, 4.5])
 
@@ -337,5 +371,6 @@ if __name__ == "__main__":
     test_state_server_can_canonicalize_imu_in_camera_extrinsics()
     test_add_clone_matches_between_equivalent_extrinsics_conventions()
     test_msckf_rejects_features_when_required_clone_was_marginalized()
-    test_msckf_update_stats_include_accepted_track_diagnostics()
+    test_msckf_update_stats_leave_accepted_track_diagnostics_disabled_by_default()
+    test_msckf_can_collect_accepted_track_diagnostics_when_enabled()
     print("Backend consistency tests passed.")

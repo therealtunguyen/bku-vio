@@ -19,6 +19,7 @@ class MSCKFUpdater:
         self.last_rejection_reason = None
         self.last_innovation_condition_number = 0.0
         self.last_dx_bg_norm = 0.0
+        self.collect_feature_diagnostics = False
 
         # Runtime safety rails. These are intentionally conservative because a
         # single bad visual batch can destroy the inertial state.
@@ -220,22 +221,23 @@ class MSCKFUpdater:
             H_xo, r_o = self.null_space_projection(H_x, H_f, r)
             if H_xo is not None and r_o is not None:
                 if self._gating_test(H_xo, r_o):
-                    geometry_stats = self._compute_feature_geometry_stats(
-                        feature_3d,
-                        feature,
-                    )
                     H_stacked.append(H_xo)
                     r_stacked.append(r_o)
                     stats["accepted"] += 1
                     stats["rows"] += H_xo.shape[0]
-                    diagnostic = {
-                        "feature_id": int(feature.feature_id),
-                        "accepted_rows": int(H_xo.shape[0]),
-                        "pre_gating_residual_norm": float(np.linalg.norm(r_o)),
-                    }
-                    if geometry_stats is not None:
-                        diagnostic.update(geometry_stats)
-                    stats["accepted_track_diagnostics"].append(diagnostic)
+                    if self.collect_feature_diagnostics:
+                        geometry_stats = self._compute_feature_geometry_stats(
+                            feature_3d,
+                            feature,
+                        )
+                        diagnostic = {
+                            "feature_id": int(feature.feature_id),
+                            "accepted_rows": int(H_xo.shape[0]),
+                            "pre_gating_residual_norm": float(np.linalg.norm(r_o)),
+                        }
+                        if geometry_stats is not None:
+                            diagnostic.update(geometry_stats)
+                        stats["accepted_track_diagnostics"].append(diagnostic)
                 else:
                     stats["gated_out"] += 1
 

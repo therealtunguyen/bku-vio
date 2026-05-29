@@ -234,6 +234,7 @@ class VIOSystemNode(Node):
         self.declare_parameter('stop_after_processed_frames', 0)
         self.declare_parameter('max_imu_init_gap', 0.1)
         self.declare_parameter('max_frame_timestamp_gap', 0.1)
+        self.declare_parameter('reset_on_large_frame_gap', False)
         self.image_processing_width = (
             self.get_parameter('image_processing_width')
             .get_parameter_value()
@@ -293,6 +294,11 @@ class VIOSystemNode(Node):
             self.get_parameter('max_frame_timestamp_gap')
             .get_parameter_value()
             .double_value
+        )
+        self.reset_on_large_frame_gap = (
+            self.get_parameter('reset_on_large_frame_gap')
+            .get_parameter_value()
+            .bool_value
         )
         self.max_imu_init_gap = sanitize_time_gap_threshold(
             configured_max_imu_init_gap,
@@ -458,6 +464,7 @@ class VIOSystemNode(Node):
             f"stop_after_processed_frames={self.stop_after_processed_frames}, "
             f"max_imu_init_gap={self.max_imu_init_gap:.4f}, "
             f"max_frame_timestamp_gap={self.max_frame_timestamp_gap:.4f}, "
+            f"reset_on_large_frame_gap={self.reset_on_large_frame_gap}, "
             f"max_imu_dt={self.imu_propagator.max_imu_dt:.4f}, "
             f"max_dx_pos={self.msckf_updater.max_batch_dx_pos_norm:.4f}, "
             f"max_dx_vel={self.msckf_updater.max_batch_dx_vel_norm:.4f}, "
@@ -747,14 +754,13 @@ class VIOSystemNode(Node):
                     continue
                 frame_start = time.perf_counter()
                 previous_image_time = self.last_image_time
-                if is_frame_timestamp_discontinuity(
-                    previous_image_time,
-                    image_time,
-                    self.max_frame_timestamp_gap,
-                ):
+                timestamp_gap = 0.0
+                if previous_image_time >= 0.0:
+                    timestamp_gap = image_time - previous_image_time
+                if self._should_reset_for_frame_gap(timestamp_gap):
                     self._handle_frame_timestamp_discontinuity(
                         image_time=image_time,
-                        timestamp_gap=image_time - previous_image_time,
+                        timestamp_gap=timestamp_gap,
                     )
                     continue
 
@@ -894,9 +900,6 @@ class VIOSystemNode(Node):
                     self.runtime_diagnostics_enabled
                     and self.images_processed % self.diagnostics_log_every_n_frames == 0
                 ):
-                    timestamp_gap = 0.0
-                    if previous_image_time >= 0.0:
-                        timestamp_gap = image_time - previous_image_time
                     pos, vel, accel_bias, gyro_bias = state_snapshot
                     total_ms = (time.perf_counter() - frame_start) * 1000.0
                     self.get_logger().info(
@@ -924,7 +927,7 @@ class VIOSystemNode(Node):
                         f"|ba|={np.linalg.norm(accel_bias):.3f}, "
                         f"|bg|={np.linalg.norm(gyro_bias):.3f}"
                     )
-                    if timestamp_gap > 0.1:
+                    if timestamp_gap > self.max_frame_timestamp_gap:
                         self.get_logger().warn(
                             f"Large image timestamp gap: {timestamp_gap:.4f}s"
                         )
@@ -968,6 +971,15 @@ class VIOSystemNode(Node):
 
         self.msckf_updater.process_mature_features(mature_features)
         return dict(self.msckf_updater.last_update_stats)
+
+    def _should_reset_for_frame_gap(self, timestamp_gap: float) -> bool:
+        if self.last_image_time < 0.0:
+            return False
+        if timestamp_gap <= 0.0:
+            return True
+        if timestamp_gap <= self.max_frame_timestamp_gap:
+            return False
+        return self.reset_on_large_frame_gap
 
     def _handle_frame_timestamp_discontinuity(
         self,

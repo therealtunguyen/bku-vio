@@ -65,6 +65,7 @@ def generate_launch_description():
                         "max_batch_dx_bias_norm": 0.03,
                         "max_imu_init_gap": 0.2,
                         "max_frame_timestamp_gap": 0.25,
+                        "reset_on_large_frame_gap": True,
                         "camera_fx": 646.33728,
                         "camera_fy": 645.676147,
                         "camera_cx": 643.358276,
