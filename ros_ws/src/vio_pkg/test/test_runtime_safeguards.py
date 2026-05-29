@@ -137,6 +137,7 @@ def test_hcmut_launch_preset_uses_same_bias_rail_as_replay_default():
         f'"min_triangulation_parallax_deg": '
         f"{DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG}"
     ) in launch_text
+    assert '"reset_on_large_frame_gap": False' in launch_text
 
 
 def test_imu_propagator_skips_unreasonably_large_dt_discontinuity():

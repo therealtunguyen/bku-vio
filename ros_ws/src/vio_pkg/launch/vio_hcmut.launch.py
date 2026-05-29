@@ -72,7 +72,10 @@ def generate_launch_description():
                         "min_triangulation_parallax_deg": 2.0,
                         "max_imu_init_gap": 0.2,
                         "max_frame_timestamp_gap": 0.25,
-                        "reset_on_large_frame_gap": True,
+                        # This bag contains several real multi-second image
+                        # holes. Resetting temporal state on those forward
+                        # gaps adds churn without improving replay stability.
+                        "reset_on_large_frame_gap": False,
                         "camera_fx": 646.33728,
                         "camera_fy": 645.676147,
                         "camera_cx": 643.358276,
