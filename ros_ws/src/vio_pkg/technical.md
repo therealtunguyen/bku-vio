@@ -16,7 +16,7 @@ Tự implement lõi (core) toán học và Computer Vision vào khung (skeleton)
   - `feature_manager.py`: Lọc điểm nhiễu (RANSAC) và quản lý ID.
   - -> Output: Sinh ra tập điểm theo dõi bền bỉ để chuyển đi (`MatureFeatures`).
 - **Phase 3 (IMU Propagation - File `backend/propagator.py`):** Cài đặt tích phân Kinematics RK4 để nhích (predict) Trạng thái Tương lai của Vị trí, Vận tốc, Sai số (Bias) và sinh ma trận hiệp phương sai Covariance.
-- **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch. Phase này đã hoàn thành cho EuRoC `V1_01_easy`; hệ thống đạt mục tiêu ATE RMSE < 1.0 m khi đánh giá bằng `evo` với SE(3) alignment, không scale correction.
+- **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch. Phase này đã hoàn thành cho EuRoC `V1_01_easy`; hệ thống đạt mục tiêu ATE RMSE < 1.0 m khi đánh giá bằng `evo` với SE(3) alignment, không scale correction. Replay full-run gần nhất trên EuRoC ghi nhận ATE RMSE `0.134976 m` với `2891` odometry poses, không có queue-drop warnings, và không có worker crashes, phù hợp với mốc full-run `0.132867 m` đã ghi nhận trước đó.
 - **Phase 5 (Pure VIO Hardening):** Khóa scope về pure VIO/MSCKF. Trọng tâm là giữ baseline EuRoC M4 reproducible, tăng độ ổn định runtime, và debug path HCMUT/D455 như smoke test mà không tạo estimator mode mới.
 
 ## 3. Cách Thiết Kế (Architecture & Design Pattern)
@@ -145,6 +145,13 @@ Expected EuRoC runtime log includes:
 ```text
 Input sensor QoS reliability: reliable
 ```
+
+Kết quả full replay EuRoC gần nhất:
+
+- ATE RMSE `0.134976 m`
+- `2891` odometry poses
+- `0` queue-drop warnings
+- `0` worker crashes
 
 ## 6. Deliverables
 - Skeleton Data Flow Pipeline Python bảo mật tránh rò rỉ RAM rớt FPS.

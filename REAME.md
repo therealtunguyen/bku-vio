@@ -14,6 +14,10 @@
 ## 0. Trạng thái hiện tại
 
 - M4 MSCKF measurement update đã hoàn thành trên EuRoC `V1_01_easy`.
+- Kết quả replay EuRoC full-run mới nhất với runner hiện tại đạt ATE RMSE
+  `0.134976 m`, ghi nhận `2891` odometry poses, không có queue-drop warnings,
+  và không có worker crashes; đây là mốc full-run nên dùng để đối chiếu cho
+  các lần chạy sau.
 - Project scope hiện là pure VIO/MSCKF; không còn nhánh ArUco trong kế hoạch.
 - Launch mặc định vẫn chạy EuRoC với calibration EuRoC:
   - Intrinsics/distortion mặc định nằm trong `backend/msckf_updater.py`.

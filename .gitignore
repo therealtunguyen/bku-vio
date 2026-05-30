@@ -23,3 +23,13 @@ dataset/
 .claude/
 # Added by code-review-graph
 .code-review-graph/
+
+# Local-only workspace files
+.github/
+.mcp.json
+AGENTS.md
+_local_docs/
+docs/
+report/
+results/
+tf_static_extrinsics.txt
