@@ -57,6 +57,9 @@ class FeatureManager:
         :param current_camera_pose: Camera pose after IMU propagation.
         :return: Mature feature tracks ready for the MSCKF backend.
         """
+        if self._prev_image is not None and self._prev_image.shape != image.shape:
+            self.reset()
+
         if self._prev_image is None:
             self._handle_first_frame(image, current_camera_pose)
         else:

@@ -213,12 +213,19 @@ def _is_intentional_launch_shutdown(log_text: str) -> bool:
 
 def check_hcmut_smoke_log(log_text: str) -> dict[str, Any]:
     reasons: list[str] = []
-    frame_gap_resets = len(
-        re.findall(
-            r"Resetting temporal state after image timestamp discontinuity",
-            log_text,
-        )
+    large_image_timestamp_gaps = len(
+        re.findall(r"Large image timestamp gap:", log_text)
     )
+    frame_gap_matches = re.findall(
+        (
+            r"Resetting temporal state after image timestamp discontinuity: "
+            r"(?:kind=[^,]+,\s*)?dt_img=([-+0-9.eE]+)s"
+        ),
+        log_text,
+    )
+    frame_gap_resets = len(frame_gap_matches)
+    backward_jump_resets = sum(float(value) <= 0.0 for value in frame_gap_matches)
+    forward_gap_resets = sum(float(value) > 0.0 for value in frame_gap_matches)
     imu_init_resets = len(
         re.findall(
             r"Resetting IMU init buffer after timestamp discontinuity",
@@ -227,18 +234,29 @@ def check_hcmut_smoke_log(log_text: str) -> dict[str, Any]:
     )
     image_queue_full = len(re.findall(r"image queue full", log_text, flags=re.I))
     intentional_shutdown = _is_intentional_launch_shutdown(log_text)
-    worker_crash = (
-        not intentional_shutdown
-        and bool(
-            re.search(
-                r"(Ordered VIO Worker Crashed|process has died|Traceback)",
-                log_text,
-            )
+    crash_signature = ""
+    crash_match = re.search(r"Ordered VIO Worker Crashed:\s*(.+)", log_text)
+    if crash_match:
+        crash_signature = crash_match.group(1).strip()
+
+    peak_vel_norm = 0.0
+    for match in re.finditer(r"\bvel_norm=([-+0-9.eE]+)", log_text):
+        peak_vel_norm = max(peak_vel_norm, float(match.group(1)))
+
+    worker_crash = not intentional_shutdown and bool(
+        crash_signature
+        or re.search(
+            r"(process has died|Traceback)",
+            log_text,
         )
     )
 
     if worker_crash:
         reasons.append("worker crash detected")
+    if large_image_timestamp_gaps > 0:
+        reasons.append(
+            f"large image timestamp gap detected ({large_image_timestamp_gaps})"
+        )
     if frame_gap_resets > 0:
         reasons.append(f"frame-gap reset detected ({frame_gap_resets})")
     if imu_init_resets > 0:
@@ -263,11 +281,16 @@ def check_hcmut_smoke_log(log_text: str) -> dict[str, Any]:
         "reasons": reasons,
         "intentional_shutdown": intentional_shutdown,
         "worker_crash": worker_crash,
+        "crash_signature": crash_signature,
+        "large_image_timestamp_gaps": large_image_timestamp_gaps,
         "frame_gap_resets": frame_gap_resets,
+        "backward_jump_resets": backward_jump_resets,
+        "forward_gap_resets": forward_gap_resets,
         "imu_init_resets": imu_init_resets,
         "image_queue_full": image_queue_full,
         "msckf_present": msckf_present,
         "accepted_updates": accepted_updates,
+        "peak_vel_norm": peak_vel_norm,
     }
 
 

@@ -14,12 +14,19 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from vio_pkg.backend.math_utils import matrix_to_quaternion
 from vio_pkg.backend.msckf_updater import MSCKFUpdater
 from vio_pkg.backend.propagator import ImuPropagator
 from vio_pkg.backend.state_server import StateServer
+from vio_pkg.frontend.detectors import ShiTomasiDetector
+from vio_pkg.frontend.feature_manager import FeatureManager
+from vio_pkg.frontend.interfaces import FrontendConfig
+from vio_pkg.frontend.trackers import KLTTracker
+from vio_pkg.utils.common import CameraPose
 from vio_pkg.utils.common import ImuData
 from vio_pkg.vio_node import (
     VIOSystemNode,
+    classify_frame_timestamp_gap,
     compute_static_imu_initialization,
     compute_effective_camera_calibration,
     is_frame_timestamp_discontinuity,
@@ -30,11 +37,14 @@ from vio_pkg.vio_node import (
     update_initial_imu_buffer,
 )
 from test_hcmut_propagation_replay import (
+    DRIFT_THRESHOLD,
     DEFAULT_CAMERA_EXTRINSICS_CONVENTION,
     DEFAULT_CAMERA_R_IC,
     DEFAULT_CAMERA_T_IC,
     DEFAULT_MAX_BATCH_DX_BIAS_NORM,
     DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG,
+    FrameMetric,
+    find_first_divergence_frame,
 )
 
 
@@ -138,6 +148,22 @@ def test_hcmut_launch_preset_uses_same_bias_rail_as_replay_default():
         f"{DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG}"
     ) in launch_text
     assert '"reset_on_large_frame_gap": False' in launch_text
+
+
+def test_find_first_divergence_frame_reports_threshold_crossing():
+    metrics = [
+        FrameMetric(1, 1, 0.0, 0.1, 6, 0, 0, 0.0, 9.81, 0.0),
+        FrameMetric(2, 2, 0.1, DRIFT_THRESHOLD, 6, 0, 0, 0.0, 9.81, 0.0),
+        FrameMetric(3, 3, 0.2, DRIFT_THRESHOLD + 0.1, 6, 0, 0, 0.0, 9.81, 0.0),
+    ]
+
+    divergence = find_first_divergence_frame(metrics, vel_norm_limit=DRIFT_THRESHOLD)
+
+    assert divergence == {
+        "processed_frame": 2,
+        "raw_image_index": 2,
+        "vel_norm": DRIFT_THRESHOLD,
+    }
 
 
 def test_imu_propagator_skips_unreasonably_large_dt_discontinuity():
@@ -284,7 +310,15 @@ def test_static_imu_initialization_matches_level_stationary_case():
     assert np.isclose(init_end_time, samples[-1].timestamp)
 
 
+def test_classify_frame_timestamp_gap_distinguishes_backward_and_forward_gaps():
+    assert classify_frame_timestamp_gap(-1.0, 10.0, 0.25) == "first_frame"
+    assert classify_frame_timestamp_gap(10.0, 9.9, 0.25) == "backward_jump"
+    assert classify_frame_timestamp_gap(10.0, 10.5, 0.25) == "large_forward_gap"
+    assert classify_frame_timestamp_gap(10.0, 10.02, 0.25) == "ok"
+
+
 def test_frame_timestamp_discontinuity_detects_backward_and_large_forward_jumps():
+    assert is_frame_timestamp_discontinuity(-1.0, 10.0, 0.1) is False
     assert is_frame_timestamp_discontinuity(10.0, 9.5, 0.1) is True
     assert is_frame_timestamp_discontinuity(10.0, 10.25, 0.1) is True
     assert is_frame_timestamp_discontinuity(10.0, 10.03, 0.1) is False
@@ -316,6 +350,74 @@ def test_state_server_rejects_unknown_camera_extrinsics_convention():
         raise AssertionError("Expected ValueError for unknown convention")
 
 
+def test_feature_manager_reset_makes_next_frame_a_new_first_frame():
+    cfg = FrontendConfig(max_features=20)
+    fm = FeatureManager(ShiTomasiDetector(cfg), KLTTracker(cfg), cfg)
+    image = np.zeros((120, 160), dtype=np.uint8)
+    image[40:80, 60:100] = 255
+    pose = CameraPose(
+        timestamp=0.0,
+        position=np.zeros(3),
+        quaternion=matrix_to_quaternion(np.eye(3)),
+    )
+
+    fm.process_image(0.0, image, pose)
+    fm.reset()
+    mature = fm.process_image(1.0, image, pose)
+
+    assert mature == []
+    assert fm._prev_image is image
+    assert len(fm.active_tracks) > 0
+
+
+def test_feature_manager_resets_on_image_shape_change_before_tracking():
+    class DummyDetector:
+        def detect(self, image, mask=None):
+            return [
+                np.array([20.0, 20.0]),
+                np.array([40.0, 40.0]),
+            ]
+
+    class DummyTracker:
+        def __init__(self):
+            self.calls = 0
+
+        def track(self, prev_image, image, pts):
+            self.calls += 1
+            raise AssertionError("tracker should not run across shape change")
+
+    cfg = FrontendConfig(max_features=20)
+    tracker = DummyTracker()
+    fm = FeatureManager(DummyDetector(), tracker, cfg)
+    pose_a = CameraPose(
+        timestamp=0.0,
+        position=np.zeros(3),
+        quaternion=matrix_to_quaternion(np.eye(3)),
+    )
+    pose_b = CameraPose(
+        timestamp=1.0,
+        position=np.zeros(3),
+        quaternion=matrix_to_quaternion(np.eye(3)),
+    )
+
+    image_a = np.zeros((120, 160), dtype=np.uint8)
+    image_a[40:80, 60:100] = 255
+    image_b = np.zeros((100, 160), dtype=np.uint8)
+    image_b[30:70, 50:90] = 255
+
+    fm.process_image(0.0, image_a, pose_a)
+    first_ids = [track.feature_id for track in fm.active_tracks]
+    mature = fm.process_image(1.0, image_b, pose_b)
+
+    assert mature == []
+    assert tracker.calls == 0
+    assert fm._prev_image is image_b
+    assert len(fm.active_tracks) > 0
+    assert all(len(track.observations) == 1 for track in fm.active_tracks)
+    assert all(track.camera_states[0].timestamp == 1.0 for track in fm.active_tracks)
+    assert set(track.feature_id for track in fm.active_tracks).isdisjoint(first_ids)
+
+
 def _make_dummy_frontend():
     return type(
         "DummyFrontend",
@@ -334,11 +436,10 @@ def _make_dummy_frontend():
 
 
 def _make_dummy_logger():
-    return type(
-        "DummyLogger",
-        (),
-        {"warn": lambda self, msg: None},
-    )()
+    logger = type("DummyLogger", (), {})()
+    logger.warn_messages = []
+    logger.warn = lambda msg: logger.warn_messages.append(msg)
+    return logger
 
 
 def test_vio_node_does_not_reset_on_large_forward_gap_when_disabled():
@@ -391,7 +492,12 @@ def test_vio_node_resets_on_large_forward_gap_when_enabled():
 
     assert should_reset is True
 
-    VIOSystemNode._handle_frame_timestamp_discontinuity(node, 12.2, 0.2)
+    VIOSystemNode._handle_frame_timestamp_discontinuity(
+        node,
+        12.2,
+        0.2,
+        "large_forward_gap",
+    )
 
     assert node.last_image_time == 12.2
     assert node.state_server.state.timestamp == 12.2
@@ -402,6 +508,43 @@ def test_vio_node_resets_on_large_forward_gap_when_enabled():
     assert node.frontend.mature_tracks == []
     assert node.frontend._prev_image is None
     assert node._discontinuity_reset_count == 1
+
+
+def test_vio_node_skips_frontend_update_after_large_forward_gap_when_resets_disabled():
+    node = object.__new__(VIOSystemNode)
+    node.frontend = _make_dummy_frontend()
+    node.state_server = StateServer(R_IC=np.eye(3), t_IC=np.zeros(3))
+    node.state_server.add_clone(1.0, np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+    node.state_server.state.timestamp = 12.0
+    node.last_image_time = 12.0
+    node.reset_on_large_frame_gap = False
+    node.imu_lock = threading.Lock()
+    node.imu_buffer = [
+        ImuData(timestamp=12.05, accel=np.zeros(3), gyro=np.zeros(3)),
+        ImuData(timestamp=12.40, accel=np.zeros(3), gyro=np.zeros(3)),
+        ImuData(timestamp=12.90, accel=np.zeros(3), gyro=np.zeros(3)),
+    ]
+    node.imu_propagator = ImuPropagator(node.state_server)
+    node.imu_propagator.max_imu_dt = 1.0
+    logger = _make_dummy_logger()
+    node.get_logger = lambda: logger
+
+    VIOSystemNode._skip_frontend_update_after_large_forward_gap(
+        node,
+        image_time=12.8,
+        timestamp_gap=0.8,
+    )
+
+    assert node.last_image_time == 12.8
+    assert node.state_server.state.timestamp == 12.40
+    assert len(node.state_server.state.clone_poses) == 1
+    assert [imu.timestamp for imu in node.imu_buffer] == [12.90]
+    assert node.frontend.active_tracks == []
+    assert node.frontend.mature_tracks == []
+    assert node.frontend._prev_image is None
+    assert logger.warn_messages == [
+        "Skipping visual update after large forward image gap: dt_img=0.8000s"
+    ]
 
 
 def test_vio_node_resets_temporal_state_on_backward_timestamp_discontinuity():
@@ -421,7 +564,12 @@ def test_vio_node_resets_temporal_state_on_backward_timestamp_discontinuity():
     ]
     node.get_logger = lambda: _make_dummy_logger()
 
-    VIOSystemNode._handle_frame_timestamp_discontinuity(node, 9.0, -3.0)
+    VIOSystemNode._handle_frame_timestamp_discontinuity(
+        node,
+        9.0,
+        -3.0,
+        "backward_jump",
+    )
 
     assert node.last_image_time == 9.0
     assert node.state_server.state.timestamp == 9.0

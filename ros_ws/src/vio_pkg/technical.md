@@ -118,6 +118,35 @@ R =
 t = [0.028793809935, 0.007352355558, 0.015779949041]
 ```
 
+### HCMUT D455 smoke status
+
+- Runner: `tools/run_m6_eval.py --case hcmut_d455_smoke`
+- Verified on `2026-05-30` với results root:
+  - `/home/ubuntu/VIO/results/hcmut_smoke_stabilized_task5_20260530_001`
+- Evidence path:
+  - `/home/ubuntu/VIO/results/hcmut_smoke_stabilized_task5_20260530_001/hcmut_d455_smoke_summary.json`
+- Verified smoke facts từ summary JSON:
+  - `smoke_check.ok == true`
+  - `worker_crash == false`
+  - `frame_gap_resets == 0`
+  - `backward_jump_resets == 0`
+  - `forward_gap_resets == 0`
+  - `accepted_updates == 5`
+  - `peak_vel_norm == 158.136`
+  - `large_image_timestamp_gaps == 0`
+  - `imu_init_resets == 0`
+  - `image_queue_full == 0`
+- Runtime facts từ cùng smoke run:
+  - `launch_returncode == 0`
+  - `record_returncode == 0`
+  - `node_finished == true`
+  - `timed_out == false`
+
+Deterministic replay harness cùng ngày vẫn báo `classification=intrinsic_propagation`
+và `first_divergence=processed_frame:181, raw_image:201, vel_norm:0.177831`.
+Điều này không làm hỏng smoke check hiện tại, nhưng cho thấy path HCMUT vẫn còn
+late-run drift cần tiếp tục debug trước khi coi là accuracy-ready.
+
 ## 5. Verification
 
 Chạy trong Docker container:

@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -20,16 +21,23 @@ def generate_launch_description():
         default_value="120",
         description="Number of startup IMU samples for gravity/bias initialization.",
     )
+    stop_after_processed_frames_arg = DeclareLaunchArgument(
+        "stop_after_processed_frames",
+        default_value="0",
+        description="Stop automatically after processing N frames; 0 disables the limit.",
+    )
 
     bag_path = LaunchConfiguration("bag_path")
     bag_rate = LaunchConfiguration("bag_rate")
     imu_init_sample_count = LaunchConfiguration("imu_init_sample_count")
+    stop_after_processed_frames = LaunchConfiguration("stop_after_processed_frames")
 
     return LaunchDescription(
         [
             bag_path_arg,
             bag_rate_arg,
             imu_init_sample_count_arg,
+            stop_after_processed_frames_arg,
             ExecuteProcess(
                 cmd=[
                     "ros2",
@@ -53,7 +61,10 @@ def generate_launch_description():
                 parameters=[
                     {
                         "use_sim_time": True,
-                        "imu_init_sample_count": imu_init_sample_count,
+                        "imu_init_sample_count": ParameterValue(
+                            imu_init_sample_count,
+                            value_type=int,
+                        ),
                         "input_qos_reliability": "best_effort",
                         "image_processing_width": 752,
                         "image_queue_size": 50,
@@ -76,6 +87,10 @@ def generate_launch_description():
                         # holes. Resetting temporal state on those forward
                         # gaps adds churn without improving replay stability.
                         "reset_on_large_frame_gap": False,
+                        "stop_after_processed_frames": ParameterValue(
+                            stop_after_processed_frames,
+                            value_type=int,
+                        ),
                         "camera_fx": 646.33728,
                         "camera_fy": 645.676147,
                         "camera_cx": 643.358276,

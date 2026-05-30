@@ -175,11 +175,27 @@ def is_frame_timestamp_discontinuity(
     image_time: float,
     max_gap_s: float,
 ) -> bool:
+    return classify_frame_timestamp_gap(
+        previous_image_time,
+        image_time,
+        max_gap_s,
+    ) in ("backward_jump", "large_forward_gap")
+
+
+def classify_frame_timestamp_gap(
+    previous_image_time: float,
+    image_time: float,
+    max_gap_s: float,
+) -> str:
     if previous_image_time < 0.0:
-        return False
+        return "first_frame"
 
     gap = float(image_time - previous_image_time)
-    return gap <= 0.0 or gap > max_gap_s
+    if gap <= 0.0:
+        return "backward_jump"
+    if gap > max_gap_s:
+        return "large_forward_gap"
+    return "ok"
 
 
 def sanitize_time_gap_threshold(
@@ -773,8 +789,20 @@ class VIOSystemNode(Node):
                 timestamp_gap = 0.0
                 if previous_image_time >= 0.0:
                     timestamp_gap = image_time - previous_image_time
-                if self._should_reset_for_frame_gap(timestamp_gap):
+                gap_kind = classify_frame_timestamp_gap(
+                    previous_image_time,
+                    image_time,
+                    self.max_frame_timestamp_gap,
+                )
+                if self._should_reset_for_frame_gap_kind(gap_kind):
                     self._handle_frame_timestamp_discontinuity(
+                        image_time=image_time,
+                        timestamp_gap=timestamp_gap,
+                        gap_kind=gap_kind,
+                    )
+                    continue
+                if gap_kind == "large_forward_gap":
+                    self._skip_frontend_update_after_large_forward_gap(
                         image_time=image_time,
                         timestamp_gap=timestamp_gap,
                     )
@@ -991,21 +1019,33 @@ class VIOSystemNode(Node):
     def _should_reset_for_frame_gap(self, timestamp_gap: float) -> bool:
         if self.last_image_time < 0.0:
             return False
-        if timestamp_gap <= 0.0:
-            return True
-        if timestamp_gap <= self.max_frame_timestamp_gap:
+        gap_kind = classify_frame_timestamp_gap(
+            self.last_image_time,
+            self.last_image_time + float(timestamp_gap),
+            self.max_frame_timestamp_gap,
+        )
+        return self._should_reset_for_frame_gap_kind(gap_kind)
+
+    def _should_reset_for_frame_gap_kind(self, gap_kind: str) -> bool:
+        if gap_kind in ("first_frame", "ok"):
             return False
-        return self.reset_on_large_frame_gap
+        if gap_kind == "backward_jump":
+            return True
+        if gap_kind == "large_forward_gap":
+            return self.reset_on_large_frame_gap
+        raise ValueError(f"Unknown frame timestamp gap classification: {gap_kind}")
 
     def _handle_frame_timestamp_discontinuity(
         self,
         image_time: float,
         timestamp_gap: float,
+        gap_kind: str,
     ) -> None:
         self._discontinuity_reset_count += 1
         self.get_logger().warn(
             "Resetting temporal state after image timestamp discontinuity: "
-            f"dt_img={timestamp_gap:.4f}s, reset_count={self._discontinuity_reset_count}"
+            f"kind={gap_kind}, dt_img={timestamp_gap:.4f}s, "
+            f"reset_count={self._discontinuity_reset_count}"
         )
 
         with self.imu_lock:
@@ -1018,6 +1058,29 @@ class VIOSystemNode(Node):
         with self.state_server.lock:
             self.state_server.clear_clones()
             self.state_server.state.timestamp = image_time
+        self.last_image_time = image_time
+
+    def _skip_frontend_update_after_large_forward_gap(
+        self,
+        image_time: float,
+        timestamp_gap: float,
+    ) -> None:
+        with self.imu_lock:
+            imu_measurements = [
+                m for m in self.imu_buffer
+                if self.last_image_time < m.timestamp <= image_time
+            ]
+            self.imu_buffer = [
+                m for m in self.imu_buffer
+                if m.timestamp > image_time
+            ]
+        if imu_measurements:
+            self.imu_propagator.propagate(imu_measurements)
+        self.get_logger().warn(
+            "Skipping visual update after large forward image gap: "
+            f"dt_img={timestamp_gap:.4f}s"
+        )
+        self.frontend.reset()
         self.last_image_time = image_time
 
     def _should_request_stop(self) -> bool:

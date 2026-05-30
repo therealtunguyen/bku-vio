@@ -195,6 +195,65 @@ def test_check_hcmut_smoke_log_ignores_intentional_shutdown_after_clean_playback
     assert result["reasons"] == []
 
 
+def test_check_hcmut_smoke_log_reports_peak_velocity_and_crash_signature():
+    module = load_run_m6_eval_module()
+    log_text = """
+    [vio_system_node]: Runtime diagnostics: frame=650, vel_norm=158.679, dt_img=0.0333s
+    [vio_system_node]: Ordered VIO Worker Crashed: OpenCV(4.13.0) calcOpticalFlowPyrLK
+    Traceback (most recent call last):
+    """
+
+    smoke = module.check_hcmut_smoke_log(log_text)
+
+    assert smoke["worker_crash"] is True
+    assert smoke["peak_vel_norm"] == 158.679
+    assert "OpenCV(4.13.0) calcOpticalFlowPyrLK" in smoke["crash_signature"]
+
+
+def test_check_hcmut_smoke_log_counts_backward_gap_resets_separately():
+    module = load_run_m6_eval_module()
+    log_text = """
+    [vio_system_node]: Resetting temporal state after image timestamp discontinuity: dt_img=-372864616.9668s, reset_count=1
+    [vio_system_node]: Runtime diagnostics: frame=10, vel_norm=0.002, dt_img=372864617.0501s
+    [vio_system_node]: MSCKF diagnostics: mature=0, accepted=0
+    """
+
+    smoke = module.check_hcmut_smoke_log(log_text)
+
+    assert smoke["frame_gap_resets"] == 1
+    assert smoke["backward_jump_resets"] == 1
+    assert smoke["peak_vel_norm"] == 0.002
+
+
+def test_check_hcmut_smoke_log_accepts_reset_lines_with_gap_kind_prefix():
+    module = load_run_m6_eval_module()
+    log_text = """
+    [vio_system_node]: Resetting temporal state after image timestamp discontinuity: kind=backward_jump, dt_img=-372864616.9668s, reset_count=1
+    [vio_system_node]: Runtime diagnostics: frame=10, vel_norm=0.002, dt_img=372864617.0501s
+    [vio_system_node]: MSCKF diagnostics: mature=0, accepted=0
+    """
+
+    smoke = module.check_hcmut_smoke_log(log_text)
+
+    assert smoke["frame_gap_resets"] == 1
+    assert smoke["backward_jump_resets"] == 1
+    assert smoke["forward_gap_resets"] == 0
+
+
+def test_check_hcmut_smoke_log_rejects_large_gap_warning_even_without_reset():
+    module = load_run_m6_eval_module()
+    log_text = """
+[WARN] [1716000000.100000000] [vio_system]: Large image timestamp gap: 2.5310s
+[INFO] [1716000000.150000000] [vio_system]: MSCKF diagnostics: mature=4, triangulated=4, accepted=2, batch_rejected=0, gated_out=0, invalid=0, triangulation_failed=0, rejected_ill_conditioned=0, rejected_unreasonable_dx=0, skipped=0, rows=54, dx_pos=1.000e-03, dx_vel=2.000e-03, dx_bg=3.000e-05, dx_ba=4.000e-05, innovation_cond=1.200e+00, pos=[0.0 0.0 0.0], vel=[0.0 0.0 0.0], ba=[0.0 0.0 0.0], bg=[0.0 0.0 0.0]
+[INFO] [1716000000.200000000] [vio_system]: Runtime diagnostics: frame=80, shape=(423, 752), scale=0.587500, queue=0/50, received=81, enqueued=81, dropped=0, dt_img=0.0321s, imu_count=14, imu_span=0.0318s, imu_large_dt_skips=0, imu_max_dt=0.0049s, decode_resize=2.4ms, propagate=1.5ms, frontend=6.7ms, backend=2.0ms, publish=0.7ms, total=13.3ms, pos=[0.2 0.1 0.4], vel_norm=0.172, |ba|=0.025, |bg|=0.002
+""".strip()
+
+    result = module.check_hcmut_smoke_log(log_text)
+
+    assert result["ok"] is False
+    assert "large image timestamp gap detected (1)" in result["reasons"]
+
+
 @pytest.mark.parametrize(
     "log_text",
     (

@@ -20,6 +20,7 @@ import os
 import sqlite3
 import sys
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -37,9 +38,9 @@ from vio_pkg.frontend.trackers import KLTTracker
 from vio_pkg.utils.common import CameraPose
 from vio_pkg.utils.common import ImuData
 from vio_pkg.vio_node import (
+    classify_frame_timestamp_gap,
     compute_effective_camera_calibration,
     compute_static_imu_initialization,
-    is_frame_timestamp_discontinuity,
     prepare_image_for_processing,
     sanitize_time_gap_threshold,
     update_initial_imu_buffer,
@@ -115,6 +116,57 @@ DEFAULT_MAX_BATCH_DX_BIAS_NORM = 0.06
 DEFAULT_MIN_TRIANGULATION_PARALLAX_DEG = 2.0
 
 
+def test_classify_frame_timestamp_gap_replay_contract_matches_live_runtime():
+    assert classify_frame_timestamp_gap(-1.0, 10.0, 0.25) == "first_frame"
+    assert classify_frame_timestamp_gap(10.0, 9.9, 0.25) == "backward_jump"
+    assert classify_frame_timestamp_gap(10.0, 10.5, 0.25) == "large_forward_gap"
+    assert classify_frame_timestamp_gap(10.0, 10.02, 0.25) == "ok"
+
+
+def test_propagation_replay_does_not_count_first_frame_as_discontinuity():
+    replay = PropagationReplay(
+        imu_init_samples=DEFAULT_IMU_INIT_SAMPLES,
+        max_imu_init_gap=DEFAULT_MAX_IMU_INIT_GAP,
+        max_frame_gap=DEFAULT_MAX_FRAME_GAP,
+        max_imu_dt=DEFAULT_MAX_IMU_DT,
+    )
+    replay.gravity_aligned = True
+    replay.last_image_time = -1.0
+    event = ReplayEvent(
+        header_time=10.0,
+        topic=DEFAULT_IMAGE_TOPIC,
+        rowid=1,
+        priority=1,
+        message=SimpleNamespace(
+            header=SimpleNamespace(
+                stamp=SimpleNamespace(sec=10, nanosec=0),
+            )
+        ),
+    )
+
+    metric = replay.process_image(event)
+
+    assert metric is not None
+    assert metric.processed_frame == 1
+    assert metric.discontinuity_count == 0
+
+
+def test_print_summary_reports_first_divergence(capsys):
+    metrics = [
+        FrameMetric(1, 1, 0.0, 0.1, 6, 0, 0, 0.0, 9.81, 0.0),
+        FrameMetric(2, 2, 0.1, DRIFT_THRESHOLD, 6, 0, 0, 0.0, 9.81, 0.0),
+    ]
+
+    _print_summary("demo", metrics)
+
+    captured = capsys.readouterr()
+
+    assert (
+        "first_divergence="
+        f"processed_frame:2, raw_image:2, vel_norm:{DRIFT_THRESHOLD:.6f}"
+    ) in captured.out
+
+
 @dataclass(frozen=True)
 class ReplayEvent:
     header_time: float
@@ -160,6 +212,13 @@ class FrameMetric:
     accepted_track_diagnostics: list[dict[str, float | int]] = field(
         default_factory=list
     )
+    imu_span_s: float = 0.0
+    clone_count: int = 0
+    rejection_reason: str = ""
+    p_pos_trace: float = 0.0
+    p_vel_trace: float = 0.0
+    p_bg_trace: float = 0.0
+    p_ba_trace: float = 0.0
 
 
 @dataclass
@@ -318,11 +377,12 @@ class PropagationReplay:
         if not self.gravity_aligned:
             return None
 
-        if is_frame_timestamp_discontinuity(
+        gap_kind = classify_frame_timestamp_gap(
             self.last_image_time,
             image_time,
             self.max_frame_gap,
-        ):
+        )
+        if gap_kind not in ("first_frame", "ok"):
             self.discontinuity_count += 1
             self.imu_buffer = [m for m in self.imu_buffer if m.timestamp > image_time]
             with self.state_server.lock:
@@ -357,6 +417,11 @@ class PropagationReplay:
         self.last_image_time = image_time
         with self.state_server.lock:
             vel_norm = float(np.linalg.norm(self.state_server.state.velocity))
+            clone_count = len(self.state_server.state.clone_poses)
+
+        imu_span_s = 0.0
+        if imu_measurements:
+            imu_span_s = float(imu_measurements[-1].timestamp - imu_measurements[0].timestamp)
 
         return FrameMetric(
             processed_frame=self.images_processed,
@@ -369,6 +434,8 @@ class PropagationReplay:
             gyro_mean_norm=gyro_mean_norm,
             accel_mean_norm=accel_mean_norm,
             world_acc_mean_norm=world_acc_mean_norm,
+            imu_span_s=imu_span_s,
+            clone_count=clone_count,
         )
 
 
@@ -524,11 +591,12 @@ class MsckfReplay(PropagationReplay):
         if not self.gravity_aligned:
             return None
 
-        if is_frame_timestamp_discontinuity(
+        gap_kind = classify_frame_timestamp_gap(
             self.last_image_time,
             image_time,
             self.max_frame_gap,
-        ):
+        )
+        if gap_kind not in ("first_frame", "ok"):
             self.discontinuity_count += 1
             self.imu_buffer = [m for m in self.imu_buffer if m.timestamp > image_time]
             self.frontend.reset()
@@ -594,9 +662,39 @@ class MsckfReplay(PropagationReplay):
             self.msckf_updater.process_mature_features(mature_features)
             update_stats = dict(self.msckf_updater.last_update_stats)
             vel_norm = float(np.linalg.norm(self.state_server.state.velocity))
+            clone_count = len(self.state_server.state.clone_poses)
+            
+            p_pos_trace = 0.0
+            p_vel_trace = 0.0
+            p_bg_trace = 0.0
+            p_ba_trace = 0.0
+            if self.state_server.covariance is not None:
+                try:
+                    p_pos_trace = float(np.trace(self.state_server.covariance[0:3, 0:3]))
+                    p_vel_trace = float(np.trace(self.state_server.covariance[3:6, 3:6]))
+                    p_bg_trace = float(np.trace(self.state_server.covariance[9:12, 9:12]))
+                    p_ba_trace = float(np.trace(self.state_server.covariance[12:15, 12:15]))
+                except (IndexError, ValueError):
+                    pass
+        
         triangulation_summary = _summarize_triangulation_diagnostics(
             triangulation_diagnostics
         )
+
+        rejection_reasons = []
+        if update_stats.get("batch_rejected", 0) > 0:
+            rejection_reasons.append("batch_rejected")
+        if update_stats.get("gated_out", 0) > 0:
+            rejection_reasons.append("gated_out")
+        if update_stats.get("triangulation_failed", 0) > 0:
+            rejection_reasons.append("triangulation_failed")
+        if update_stats.get("invalid_jacobian", 0) > 0:
+            rejection_reasons.append("invalid_jacobian")
+        rejection_reason = ",".join(rejection_reasons)
+
+        imu_span_s = 0.0
+        if imu_measurements:
+            imu_span_s = float(imu_measurements[-1].timestamp - imu_measurements[0].timestamp)
 
         self.images_processed += 1
         self.last_image_time = image_time
@@ -645,6 +743,13 @@ class MsckfReplay(PropagationReplay):
             accepted_track_diagnostics=list(
                 update_stats.get("accepted_track_diagnostics", [])
             ),
+            imu_span_s=imu_span_s,
+            clone_count=clone_count,
+            rejection_reason=rejection_reason,
+            p_pos_trace=p_pos_trace,
+            p_vel_trace=p_vel_trace,
+            p_bg_trace=p_bg_trace,
+            p_ba_trace=p_ba_trace,
         )
 
     def _apply_effective_camera_calibration(self, *, scale: float) -> None:
@@ -797,6 +902,20 @@ def _apply_bias_mode(replay: PropagationReplay, bias_mode: str) -> None:
 
 def _frame_map(metrics: list[FrameMetric]) -> dict[int, FrameMetric]:
     return {metric.processed_frame: metric for metric in metrics}
+
+
+def find_first_divergence_frame(
+    metrics: list[FrameMetric],
+    vel_norm_limit: float,
+) -> dict[str, float | int] | None:
+    for metric in metrics:
+        if metric.vel_norm >= vel_norm_limit:
+            return {
+                "processed_frame": metric.processed_frame,
+                "raw_image_index": metric.raw_image_index,
+                "vel_norm": metric.vel_norm,
+            }
+    return None
 
 
 def _summarize_triangulation_diagnostics(
@@ -1005,12 +1124,25 @@ def _print_summary(name: str, metrics: list[FrameMetric]) -> None:
     max_vel = max((metric.vel_norm for metric in metrics), default=0.0)
     discontinuities = max((metric.discontinuity_count for metric in metrics), default=0)
     large_dt_skips = sum(metric.imu_large_dt_skips for metric in metrics)
+    first_divergence = find_first_divergence_frame(
+        metrics,
+        vel_norm_limit=DRIFT_THRESHOLD,
+    )
 
     print(f"\n=== {name} ===")
     print(f"processed_frames={len(metrics)}")
     print(f"discontinuities={discontinuities}")
     print(f"imu_large_dt_skips={large_dt_skips}")
     print(f"max_vel_norm={max_vel:.6f}")
+    if first_divergence is None:
+        print("first_divergence=none")
+    else:
+        print(
+            "first_divergence="
+            f"processed_frame:{first_divergence['processed_frame']}, "
+            f"raw_image:{first_divergence['raw_image_index']}, "
+            f"vel_norm:{float(first_divergence['vel_norm']):.6f}"
+        )
     for frame in (160, 170, 180, 190, 200):
         metric = frame_by_index.get(frame)
         if metric is None:
@@ -1200,6 +1332,77 @@ def _print_optical_flow_report(
             f"p95_flow={float(np.percentile(flow, 95)):.3f} "
             f"max_flow={float(flow.max()):.3f}"
         )
+
+
+def _export_frame_metrics_csv(
+    metrics: list[FrameMetric],
+    *,
+    start_frame: int = 160,
+    stop_frame: int = 200,
+    output_file: str | None = None,
+) -> None:
+    """Export per-frame metrics for the specified window as CSV."""
+    import csv
+    
+    window = [
+        metric
+        for metric in metrics
+        if start_frame <= metric.processed_frame <= stop_frame
+    ]
+    if not window:
+        print(
+            f"\nframe_metrics_csv=missing start_frame={start_frame} stop_frame={stop_frame}"
+        )
+        return
+
+    headers = [
+        "processed_frame",
+        "raw_image_index",
+        "vel_norm",
+        "imu_sample_count",
+        "imu_span_s",
+        "accepted_count",
+        "rejected_count",
+        "mature_features",
+        "clone_count",
+        "rejection_reason",
+        "P_pos_trace",
+        "P_vel_trace",
+        "P_bg_trace",
+        "P_ba_trace",
+    ]
+
+    output_path = output_file or "frame_metrics_160_200.csv"
+    try:
+        with open(output_path, "w", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=headers)
+            writer.writeheader()
+            for metric in window:
+                rejected_count = (
+                    metric.msckf_gated_out
+                    + metric.msckf_triangulation_failed
+                    + metric.msckf_invalid_jacobian
+                    + metric.msckf_batch_rejected
+                )
+                writer.writerow({
+                    "processed_frame": metric.processed_frame,
+                    "raw_image_index": metric.raw_image_index,
+                    "vel_norm": metric.vel_norm,
+                    "imu_sample_count": metric.imu_count,
+                    "imu_span_s": metric.imu_span_s,
+                    "accepted_count": metric.msckf_accepted,
+                    "rejected_count": rejected_count,
+                    "mature_features": metric.mature_features,
+                    "clone_count": metric.clone_count,
+                    "rejection_reason": metric.rejection_reason,
+                    "P_pos_trace": metric.p_pos_trace,
+                    "P_vel_trace": metric.p_vel_trace,
+                    "P_bg_trace": metric.p_bg_trace,
+                    "P_ba_trace": metric.p_ba_trace,
+                })
+        print(f"\nframe_metrics_csv=written {len(window)} frames to {output_path}")
+    except IOError as e:
+        print(f"\nframe_metrics_csv=error writing to {output_path}: {e}")
 
 
 def _summarize_extrinsics_sweep(
@@ -1468,6 +1671,7 @@ def main() -> int:
 
     _print_summary("FULL DETERMINISTIC PASS", full_metrics)
     _print_summary("SNAPSHOT SEGMENT REPLAY", segment_metrics)
+    _export_frame_metrics_csv(full_metrics)
     _print_window_report(
         full_metrics,
         start_frame=args.report_window_start,
