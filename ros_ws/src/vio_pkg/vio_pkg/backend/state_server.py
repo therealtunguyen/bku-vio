@@ -1,7 +1,7 @@
 import numpy as np
 import threading
 from ..utils.common import State, ClonePose
-from .math_utils import quaternion_to_matrix, matrix_to_quaternion
+from .math_utils import quaternion_to_matrix, matrix_to_quaternion, skew_symmetric
 
 class StateServer:
     def __init__(self, R_IC=None, t_IC=None):
@@ -24,8 +24,8 @@ class StateServer:
         self.covariance[0:3, 0:3] = np.eye(3) * 1e-4
         self.covariance[3:6, 3:6] = np.eye(3) * 1e-4
         self.covariance[6:9, 6:9] = np.eye(3) * 1e-4
-        self.covariance[9:12, 9:12] = np.eye(3) * 1e-4
-        self.covariance[12:15, 12:15] = np.eye(3) * 1e-4
+        self.covariance[9:12, 9:12] = np.eye(3) * 1e-3
+        self.covariance[12:15, 12:15] = np.eye(3) * 1e-2
 
         # Max number of clones in the sliding window
         self.max_window_size = 20
@@ -61,7 +61,8 @@ class StateServer:
         
         J_new = np.zeros((6, n_rows))
         J_new[0:3, 6:9] = self.R_IC.T        # delta_theta_c = R_IC^T * delta_theta_I
-        J_new[3:6, 0:3] = np.eye(3)          # delta_p_c approx delta_p_I
+        J_new[3:6, 0:3] = np.eye(3)
+        J_new[3:6, 6:9] = -R_WI @ skew_symmetric(self.t_IC)
         
         P_CC_new = J_new @ P @ J_new.T
         P_IC_new = P @ J_new.T

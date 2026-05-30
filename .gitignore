@@ -16,3 +16,5 @@ htmlcov/
 dist/
 *.egg-info/
 dataset/
+# Added by code-review-graph
+.code-review-graph/
