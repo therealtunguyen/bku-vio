@@ -16,7 +16,8 @@ Tự implement lõi (core) toán học và Computer Vision vào khung (skeleton)
   - `feature_manager.py`: Lọc điểm nhiễu (RANSAC) và quản lý ID.
   - -> Output: Sinh ra tập điểm theo dõi bền bỉ để chuyển đi (`MatureFeatures`).
 - **Phase 3 (IMU Propagation - File `backend/propagator.py`):** Cài đặt tích phân Kinematics RK4 để nhích (predict) Trạng thái Tương lai của Vị trí, Vận tốc, Sai số (Bias) và sinh ma trận hiệp phương sai Covariance.
-- **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch.
+- **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch. Phase này đã hoàn thành cho EuRoC `V1_01_easy`; hệ thống đạt mục tiêu ATE RMSE < 1.0 m khi đánh giá bằng `evo` với SE(3) alignment, không scale correction.
+- **Phase 5 (ArUco Integration):** Đang bắt đầu. Mọi thay đổi ArUco phải nằm sau flag riêng để không làm thay đổi baseline M4 trên EuRoC.
 
 ## 3. Cách Thiết Kế (Architecture & Design Pattern)
 
@@ -40,11 +41,99 @@ vio_pkg/
 ```
 
 ### Luồng Dữ Liệu (Threading Producer-Consumer model)
-- **Thread 1: ROS Callbacks (Producers):** Chiếm dụng Thread hệ thống cực thấp. Đón tín hiệu chớp nhoáng thả vào RAM Queues.
-- **Thread 2: Visual Frontend (Consumer/Producer):** Tách biệt tài nguyên. Đóng gói Ảnh & IMU sync lại, cày nát CPU qua OpenCV và đẩy các chuỗi ảnh trích xuất xuống Queue 2 cho Backend.
-- **Thread 3: MSCKF Backend (Consumer):** Không đụng chạm gì Image Processing. Yên tâm thực thi đại số tuyến tính ma trận khổng lồ.
+- **Thread 1: ROS Callbacks (Producers):** Chiếm dụng Thread hệ thống cực thấp. Đón tín hiệu IMU và ảnh, đưa vào buffer/queue theo timestamp.
+- **Thread 2: Ordered VIO Worker:** Lấy từng ảnh theo thứ tự thời gian, ghép với IMU tương ứng, propagate state, thêm camera clone, chạy visual frontend, chạy MSCKF update, rồi publish odometry/path/point cloud.
+- **Backend MSCKF:** Hiện chạy trong ordered worker để update state theo đúng thứ tự timestamp. Không tạo batch update phá state nếu update quá lớn hoặc điều kiện số quá xấu.
 
-## 4. Deliverables
+## 4. Calibration, QoS, và dataset
+
+### EuRoC mặc định
+
+Launch mặc định vẫn dùng EuRoC `V1_01_easy`:
+
+- `/home/ubuntu/VIO/dataset/V1_01_easy`
+- Intrinsics/distortion EuRoC cam0 trong `backend/msckf_updater.py`
+- IMU-camera extrinsics EuRoC trong `backend/state_server.py`
+- Input QoS mặc định: `input_qos_reliability:=reliable`
+
+Giữ `reliable` cho EuRoC. Khi từng chuyển global subscription sang
+`BEST_EFFORT`, trajectory có thể chạy được lúc đầu nhưng diverge sau một thời
+gian vì có khả năng mất IMU/image messages.
+
+### Camera calibration override
+
+`MSCKFUpdater` có API:
+
+```python
+set_camera_calibration(fx, fy, cx, cy, distortion_coefficients)
+```
+
+`VIOSystemNode` expose các ROS params tương ứng:
+
+```text
+camera_fx
+camera_fy
+camera_cx
+camera_cy
+camera_distortion
+```
+
+Các params này chỉ đổi intrinsics/distortion. Khi đổi camera/dataset, vẫn phải
+đổi đúng IMU-camera extrinsics trong `StateServer`; nếu không, VIO metric sẽ
+dễ diverge dù image tracking vẫn chạy.
+
+### HCMUT / RealSense D455
+
+Dataset HCMUT/D455 hiện dùng được như smoke test, chưa dùng làm accuracy result:
+
+- RGB-only bags: dùng cho frontend/ArUco/demo, không đủ IMU để chạy VIO đầy đủ.
+- `vio_hcmut_dataset`: có color image và IMU, nhưng thiếu camera-IMU extrinsics.
+
+D455 color intrinsics từ rosbag:
+
+```text
+fx=646.33728
+fy=645.676147
+cx=643.358276
+cy=362.999176
+D=[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]
+```
+
+Với D455/HCMUT, dùng `input_qos_reliability:=best_effort` nếu bag/device publish
+sensor topics bằng best-effort QoS. Để có metric VIO đúng, cần lấy per-device
+transform giữa color camera optical frame và IMU frame từ RealSense/librealsense
+hoặc ROS `/tf_static`; không dùng giá trị D455 chung trên mạng như calibration
+thật.
+
+## 5. Verification
+
+Chạy trong Docker container:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+
+python3 src/vio_pkg/test/test_backend_consistency.py
+python3 src/vio_pkg/test/test_runtime_safeguards.py
+colcon build --packages-select vio_pkg
+```
+
+Full EuRoC run:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+source install/setup.bash
+ros2 launch vio_pkg vio_system.launch.py bag_rate:=0.2
+```
+
+Expected EuRoC runtime log includes:
+
+```text
+Input sensor QoS reliability: reliable
+```
+
+## 6. Deliverables
 - Skeleton Data Flow Pipeline Python bảo mật tránh rò rỉ RAM rớt FPS.
 - Cấu trúc Design phân tán rõ ràng (Modularity).
 - Metric Output đánh giá được RMSE (Root Mean Square Error) Track.
