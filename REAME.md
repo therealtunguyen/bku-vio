@@ -1,5 +1,28 @@
 # BKU-VIO — Visual-Inertial Odometry (CO3107)
 
+> **Kết quả & số liệu** → bắt đầu ở [`docs/results/TASK.md`](docs/results/TASK.md)
+> (index của tất cả task tuần 2). Các file con:
+> [`table.md`](docs/results/table.md) (bảng số liệu — single source of truth),
+> [`eval_commands.md`](docs/results/eval_commands.md) (lệnh chạy lại),
+> [`euroc_baseline.md`](docs/results/euroc_baseline.md),
+> [`hcmut_smoke.md`](docs/results/hcmut_smoke.md),
+> [`trajectory_plot.md`](docs/results/trajectory_plot.md),
+> [`week2_checklist.md`](docs/results/week2_checklist.md).
+> Mọi accuracy number trong báo cáo phải có một dòng `confirmed` trong `table.md`.
+> HCMUT hiện vẫn là `smoke-test only` — không dùng làm accuracy result.
+
+## 0. Trạng thái hiện tại
+
+- M4 MSCKF measurement update đã hoàn thành trên EuRoC `V1_01_easy`.
+- Project scope hiện là pure VIO/MSCKF; không còn nhánh ArUco trong kế hoạch.
+- Launch mặc định vẫn chạy EuRoC với calibration EuRoC:
+  - Intrinsics/distortion mặc định nằm trong `backend/msckf_updater.py`.
+  - IMU-camera extrinsics mặc định nằm trong `backend/state_server.py`.
+  - QoS mặc định là `input_qos_reliability:=reliable`.
+- Không dùng thông số D455/HCMUT cho EuRoC trừ khi đang test riêng dataset đó.
+- Dataset HCMUT/D455 hiện chỉ dùng smoke test. Muốn đánh giá accuracy cần có
+  camera-IMU extrinsics thật của thiết bị.
+
 ## 1. Yêu cầu
 
 | Tool | Ghi chú |
@@ -18,16 +41,21 @@ Mount `ros_ws` vào container để code được đồng bộ realtime:
 
 ```bash
 docker run -p 6080:80 \
+  --name vio-ros2 \
   --security-opt seccomp=unconfined \
   --shm-size=512m \
-  -v <path/to/ros_ws>:/home/ubuntu/VIO/ros_ws \
-  -v <path/to/dataset>:/home/ubuntu/VIO/dataset \
+  -v <path/to/bku-vio>:/home/ubuntu/VIO \
   ghcr.io/tiryoh/ros2-desktop-vnc:humble
 ```
 
-> ⚠️ Thay `<path/to/ros_ws>` và `<path/to/dataset>` bằng **absolute path** trên máy bạn.
-> Ví dụ (macOS): `-v /Users/yourname/bku-vio/ros_ws:/home/ubuntu/VIO/ros_ws`
-> Ví dụ (Linux/WSL): `-v /home/yourname/bku-vio/ros_ws:/home/ubuntu/VIO/ros_ws`
+> ⚠️ Thay `<path/to/bku-vio>` bằng **absolute path** trên máy bạn.
+> Ví dụ (Linux/WSL): `-v /home/yourname/bku-vio:/home/ubuntu/VIO`
+
+Nếu container đã tồn tại:
+
+```bash
+docker start vio-ros2
+```
 
 Truy cập VNC: **http://localhost:6080**
 
@@ -36,7 +64,8 @@ Truy cập VNC: **http://localhost:6080**
 Mở terminal trong VNC rồi chạy:
 
 ```bash
-cd ~/ros_ws
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
 colcon build --packages-select vio_pkg
 source install/setup.bash
 ```
@@ -46,8 +75,9 @@ source install/setup.bash
 ## 4. Chạy ROS 2 Bag (EuRoC dataset)
 
 ```bash
-# Terminal 1 — play rosbag
-ros2 bag play ~/dataset/V1_01_easy/
+# Terminal 1 — play rosbag thủ công nếu không dùng launch file
+source /opt/ros/humble/setup.bash
+ros2 bag play /home/ubuntu/VIO/dataset/V1_01_easy --clock --rate 0.2
 
 # Kiểm tra các topic đang publish
 ros2 topic list
@@ -64,7 +94,8 @@ Các topic chính của EuRoC:
 
 ```bash
 # Terminal 2
-cd ~/ros_ws && source install/setup.bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws && source install/setup.bash
 ros2 run vio_pkg py_sub
 ```
 
@@ -72,7 +103,8 @@ ros2 run vio_pkg py_sub
 
 ```bash
 # Terminal 2
-cd ~/ros_ws && source install/setup.bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws && source install/setup.bash
 ros2 run vio_pkg bag_reader
 ```
 
@@ -95,26 +127,124 @@ Khởi động Docker container (thay `<path/to/ros_ws>` và `<path/to/dataset>`
 
 ```bash
 docker run -p 6080:80 \
-  --name vio_container \
+  --name vio-ros2 \
   --security-opt seccomp=unconfined \
   --shm-size=512m \
-  -v <path/to/ros_ws>:/home/ubuntu/VIO/ros_ws \
-  -v <path/to/dataset>:/home/ubuntu/VIO/dataset \
+  -v <path/to/bku-vio>:/home/ubuntu/VIO \
   ghcr.io/tiryoh/ros2-desktop-vnc:humble
 ```
 
 Mở terminal trong VNC, build package và chạy launch file:
 
 ```bash
-cd ~/VIO/ros_ws
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
 colcon build --packages-select vio_pkg
 source install/setup.bash
 
-# Dataset mặc định tại /home/ubuntu/VIO/dataset — override nếu cần:
-ros2 launch vio_pkg vio_system.launch.py
+# Dataset mặc định: /home/ubuntu/VIO/dataset/V1_01_easy
+ros2 launch vio_pkg vio_system.launch.py bag_rate:=0.2
+
 # hoặc chỉ định dataset_dir cụ thể:
-ros2 launch vio_pkg vio_system.launch.py dataset_dir:=/home/ubuntu/VIO/dataset
+ros2 launch vio_pkg vio_system.launch.py dataset_dir:=/home/ubuntu/VIO/dataset bag_rate:=0.2
 ```
+
+Trong log của node, với EuRoC bạn nên thấy:
+
+```text
+Camera calibration: fx=458.654000, fy=457.296000, ...
+Input sensor QoS reliability: reliable
+```
+
+Nếu trajectory EuRoC bị diverge sau một lúc, kiểm tra trước:
+
+- Đã rebuild và `source install/setup.bash` sau khi pull code mới chưa.
+- Không còn process `ros2 launch`, `ros2 bag play`, hoặc `vio_system_node` cũ.
+- Log vẫn là `Input sensor QoS reliability: reliable`.
+
+## 9. Test và build check
+
+Chạy trong container:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+
+python3 src/vio_pkg/test/test_backend_consistency.py
+python3 src/vio_pkg/test/test_runtime_safeguards.py
+colcon build --packages-select vio_pkg
+```
+
+## 10. Chạy smoke test cho HCMUT/D455
+
+HCMUT/D455 chưa phải accuracy run chính thức, nhưng đã có một smoke-test path
+ổn định hơn với intrinsics D455 và extrinsics lấy đúng từ
+`camera_imu_optical_frame -> camera_color_optical_frame`.
+
+Color camera intrinsics từ `/camera/camera/color/camera_info`:
+
+```text
+fx=646.33728
+fy=645.676147
+cx=643.358276
+cy=362.999176
+D=[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]
+```
+
+Có thể dùng launch preset:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+source install/setup.bash
+
+ros2 launch vio_pkg vio_hcmut.launch.py
+```
+
+Hoặc chạy tay để thấy đầy đủ params:
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+source install/setup.bash
+
+ros2 run vio_pkg vio_system_node --ros-args \
+  -p use_sim_time:=true \
+  -p imu_init_sample_count:=120 \
+  -p input_qos_reliability:=best_effort \
+  -p image_processing_width:=752 \
+  -p image_queue_size:=50 \
+  -p runtime_diagnostics_enabled:=true \
+  -p diagnostics_log_every_n_frames:=10 \
+  -p publish_debug_image:=false \
+  -p log_tracked_frames:=false \
+  -p max_imu_dt:=0.05 \
+  -p max_batch_dx_bias_norm:=0.06 \
+  -p min_triangulation_parallax_deg:=2.0 \
+  -p max_imu_init_gap:=0.2 \
+  -p max_frame_timestamp_gap:=0.25 \
+  -p camera_fx:=646.33728 \
+  -p camera_fy:=645.676147 \
+  -p camera_cx:=643.358276 \
+  -p camera_cy:=362.999176 \
+  -p camera_distortion:="[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]" \
+  -p camera_extrinsics_convention:=camera_in_imu \
+  -p camera_R_IC:="[0.999996654005, 0.00159873842, -0.002033719299, -0.001599047141, 0.999998710246, -0.000150184164, 0.002033476571, 0.000153435674, 0.999997920713]" \
+  -p camera_t_IC:="[0.028793809935, 0.007352355558, 0.015779949041]"
+```
+
+Trong terminal khác:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 bag play /home/ubuntu/VIO/dataset/vio_hcmut_dataset --clock --rate 1.0 \
+  --remap /camera/camera/color/image_raw:=/cam0/image_raw /camera/camera/imu:=/imu0
+```
+
+Lưu ý: bag này publish IMU ở `camera_imu_optical_frame`, không phải
+`camera_imu_frame`. Dùng nhầm frame variant cho extrinsics sẽ làm triangulation
+và MSCKF update xấu đi rõ rệt.
+
 ## Cấu trúc thư mục
 
 ```

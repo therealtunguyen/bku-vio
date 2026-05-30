@@ -1,19 +1,69 @@
 import numpy as np
 import threading
 from ..utils.common import State, ClonePose
-from .math_utils import quaternion_to_matrix, matrix_to_quaternion
+from .math_utils import quaternion_to_matrix, matrix_to_quaternion, skew_symmetric
+
+VALID_CAMERA_EXTRINSICS_CONVENTIONS = (
+    "camera_in_imu",
+    "imu_in_camera",
+)
+
+
+def canonicalize_camera_extrinsics(
+    R,
+    t,
+    *,
+    convention: str = "camera_in_imu",
+):
+    """
+    Normalize input extrinsics to the internal camera-in-IMU convention.
+
+    Internal representation:
+      p_I = R_IC @ p_C + t_IC
+    which means:
+      R_IC rotates camera-frame vectors into the IMU frame
+      t_IC is the camera origin expressed in the IMU frame
+    """
+    R = np.asarray(R, dtype=np.float64)
+    t = np.asarray(t, dtype=np.float64)
+
+    if R.shape != (3, 3):
+        raise ValueError("R must be a 3x3 rotation matrix")
+    if t.shape != (3,):
+        raise ValueError("t must be a 3-vector")
+    if not np.allclose(R.T @ R, np.eye(3), atol=1e-6):
+        raise ValueError("R must be orthonormal")
+    if not np.isclose(np.linalg.det(R), 1.0, atol=1e-6):
+        raise ValueError("R must have determinant +1")
+
+    if convention == "camera_in_imu":
+        return R, t
+    if convention == "imu_in_camera":
+        R_ic = R.T
+        t_ic = -(R_ic @ t)
+        return R_ic, t_ic
+    raise ValueError(
+        "convention must be one of "
+        f"{VALID_CAMERA_EXTRINSICS_CONVENTIONS}"
+    )
+
 
 class StateServer:
-    def __init__(self, R_IC=None, t_IC=None):
+    def __init__(self, R_IC=None, t_IC=None, camera_extrinsics_convention="camera_in_imu"):
         self.state = State(timestamp=0.0)
         
         # Euroc V1_01_easy cam0 to imu0 extrinsics (Default fallback)
-        self.R_IC = R_IC if R_IC is not None else np.array([
+        default_R_IC = np.array([
             [ 0.0148655429818, -0.999880929698,  0.004140296794],
             [ 0.999557249008,  0.014967213324,  0.025715529948],
             [-0.0257744366974, 0.003756188357,  0.999660727108]
         ])
-        self.t_IC = t_IC if t_IC is not None else np.array([-0.0216401455, -0.0646769868, 0.0098107306])
+        default_t_IC = np.array([-0.0216401455, -0.0646769868, 0.0098107306])
+        self.set_camera_extrinsics(
+            default_R_IC if R_IC is None else R_IC,
+            default_t_IC if t_IC is None else t_IC,
+            convention=camera_extrinsics_convention,
+        )
         
         # Covariance matrix P
         # 15x15 for error state
@@ -24,14 +74,31 @@ class StateServer:
         self.covariance[0:3, 0:3] = np.eye(3) * 1e-4
         self.covariance[3:6, 3:6] = np.eye(3) * 1e-4
         self.covariance[6:9, 6:9] = np.eye(3) * 1e-4
-        self.covariance[9:12, 9:12] = np.eye(3) * 1e-4
-        self.covariance[12:15, 12:15] = np.eye(3) * 1e-4
+        self.covariance[9:12, 9:12] = np.eye(3) * 1e-3
+        self.covariance[12:15, 12:15] = np.eye(3) * 1e-2
 
         # Max number of clones in the sliding window
         self.max_window_size = 20
         
         # Concurrency Lock
         self.lock = threading.RLock()
+
+    def set_camera_extrinsics(
+        self,
+        R_IC,
+        t_IC,
+        *,
+        convention: str = "camera_in_imu",
+    ) -> None:
+        canonical_R_IC, canonical_t_IC = canonicalize_camera_extrinsics(
+            R_IC,
+            t_IC,
+            convention=convention,
+        )
+        self.R_IC = canonical_R_IC
+        self.t_IC = canonical_t_IC
+        self.camera_extrinsics_convention = "camera_in_imu"
+        self.input_camera_extrinsics_convention = convention
         
     def add_clone(self, timestamp: float, position: np.ndarray, quaternion: np.ndarray):
         """
@@ -61,7 +128,8 @@ class StateServer:
         
         J_new = np.zeros((6, n_rows))
         J_new[0:3, 6:9] = self.R_IC.T        # delta_theta_c = R_IC^T * delta_theta_I
-        J_new[3:6, 0:3] = np.eye(3)          # delta_p_c approx delta_p_I
+        J_new[3:6, 0:3] = np.eye(3)
+        J_new[3:6, 6:9] = -R_WI @ skew_symmetric(self.t_IC)
         
         P_CC_new = J_new @ P @ J_new.T
         P_IC_new = P @ J_new.T
@@ -97,3 +165,8 @@ class StateServer:
         
         # Slice the covariance matrix to drop rows and columns 15:20
         self.covariance = P[np.ix_(indices_to_keep, indices_to_keep)]
+
+    def clear_clones(self):
+        """Drop all camera clones and shrink covariance back to the IMU state."""
+        self.state.clone_poses.clear()
+        self.covariance = self.covariance[:15, :15].copy()

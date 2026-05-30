@@ -131,17 +131,26 @@ There are two test scripts in `ros_ws/src/vio_pkg/test/`:
 | `test_frontend.py` | Synthetic (generated) | No |
 | `test_frontend_dataset.py` | Real EuRoC frames from the bag | Yes (container only) |
 
+The teammate RGB-only bags under `dataset/ROSBAG_17_4_2026/` can be useful for
+visual frontend and demo checks. They do not contain IMU data, so do not
+use them as full VIO accuracy runs.
+
 ---
 
 ### Option A: Synthetic smoke test (no dataset needed)
 
 ```shell
-docker exec -it vio-ros2 bash -c "cd /home/ubuntu/VIO/ros_ws && python3 src/vio_pkg/test/test_frontend.py"
+docker exec -it vio-ros2 bash -c "
+  source /opt/ros/humble/setup.bash &&
+  cd /home/ubuntu/VIO/ros_ws &&
+  python3 src/vio_pkg/test/test_frontend.py
+"
 ```
 
 Or inside the container:
 
 ```shell
+source /opt/ros/humble/setup.bash
 cd /home/ubuntu/VIO/ros_ws
 python3 src/vio_pkg/test/test_frontend.py
 ```

@@ -16,3 +16,10 @@ htmlcov/
 dist/
 *.egg-info/
 dataset/
+# Eval runs at repo root: bag exports, TUM trajectories, evo zips, plots — never commit binaries.
+# Numbers go into docs/results/RESULTS.md; figures used in the paper go into docs/paper/figures/.
+/results/
+# Local Claude harness state
+.claude/
+# Added by code-review-graph
+.code-review-graph/
