@@ -24,8 +24,10 @@
   - IMU-camera extrinsics mặc định nằm trong `backend/state_server.py`.
   - QoS mặc định là `input_qos_reliability:=reliable`.
 - Không dùng thông số D455/HCMUT cho EuRoC trừ khi đang test riêng dataset đó.
-- Dataset HCMUT/D455 hiện chỉ dùng smoke test. Muốn đánh giá accuracy cần có
-  camera-IMU extrinsics thật của thiết bị.
+- Dataset HCMUT/D455 hiện dùng cho smoke, calibration, và replay debugging.
+  Extrinsics thật của thiết bị đã có trong `tf_static_extrinsics.txt`; phần còn
+  thiếu để coi đây là evaluation path chính thức là khóa M6 metrics/baselines,
+  không phải đi tìm extrinsics nữa.
 
 ## 1. Yêu cầu
 
@@ -183,7 +185,8 @@ colcon build --packages-select vio_pkg
 
 HCMUT/D455 chưa phải accuracy run chính thức, nhưng đã có một smoke-test path
 ổn định hơn với intrinsics D455 và extrinsics lấy đúng từ
-`camera_imu_optical_frame -> camera_color_optical_frame`.
+`camera_imu_optical_frame -> camera_color_optical_frame` trong
+`tf_static_extrinsics.txt`.
 
 Color camera intrinsics từ `/camera/camera/color/camera_info`:
 
@@ -194,6 +197,22 @@ cx=643.358276
 cy=362.999176
 D=[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]
 ```
+
+Extrinsics hiện dùng, trích từ `tf_static_extrinsics.txt`:
+
+```text
+R =
+[[ 0.999996654005,  0.001598738436, -0.002033719319],
+ [-0.001599047157,  0.999998710246, -0.000150184165],
+ [ 0.002033476591,  0.000153435676,  0.999997920713]]
+t = [0.028793809935, 0.007352355558, 0.015779949041]
+```
+
+Milestone status hiện tại:
+- M5 pure-VIO hardening: hoàn tất theo scope local docs
+- M6: đã bắt đầu phần evaluation scaffolding (`tools/run_m6_eval.py`, replay
+  harness HCMUT/EuRoC), nhưng chưa khóa systematic metrics/reporting và chưa
+  bắt đầu nhánh RPi 5
 
 Có thể dùng launch preset:
 
@@ -233,7 +252,7 @@ ros2 run vio_pkg vio_system_node --ros-args \
   -p camera_cy:=362.999176 \
   -p camera_distortion:="[-0.05594548583030701, 0.06458555161952972, -0.0002526374883018434, 0.0008183500613085926, -0.021141313016414642]" \
   -p camera_extrinsics_convention:=camera_in_imu \
-  -p camera_R_IC:="[0.999996654005, 0.00159873842, -0.002033719299, -0.001599047141, 0.999998710246, -0.000150184164, 0.002033476571, 0.000153435674, 0.999997920713]" \
+  -p camera_R_IC:="[0.999996654005, 0.001598738436, -0.002033719319, -0.001599047157, 0.999998710246, -0.000150184165, 0.002033476591, 0.000153435676, 0.999997920713]" \
   -p camera_t_IC:="[0.028793809935, 0.007352355558, 0.015779949041]"
 ```
 

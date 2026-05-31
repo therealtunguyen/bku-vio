@@ -84,12 +84,13 @@ dễ diverge dù image tracking vẫn chạy.
 
 ### HCMUT / RealSense D455
 
-Dataset HCMUT/D455 hiện dùng được như smoke test, chưa dùng làm accuracy result:
+Dataset HCMUT/D455 hiện dùng được như smoke test, calibration, và replay
+debugging; chưa dùng làm metric benchmark chính thức:
 
 - RGB-only bags: dùng cho frontend/demo, không đủ IMU để chạy VIO đầy đủ.
 - `vio_hcmut_dataset`: có color image và IMU, chạy được full VIO smoke test với
-  intrinsics D455 và extrinsics lấy từ `tf_static`, nhưng chưa nên dùng làm
-  metric-accuracy result.
+  intrinsics D455 và extrinsics lấy từ `tf_static_extrinsics.txt`, nhưng chưa
+  nên dùng làm metric-accuracy result trước khi khóa quy trình đánh giá M6.
 
 D455 color intrinsics từ rosbag:
 
@@ -106,15 +107,17 @@ sensor topics bằng best-effort QoS. Quan trọng: extrinsics phải khớp đ�
 message frame trong bag. Bag này publish image ở `camera_color_optical_frame`
 và IMU ở `camera_imu_optical_frame`, nên transform đúng là
 `camera_imu_optical_frame -> camera_color_optical_frame`, không phải
-`camera_imu_frame -> camera_color_optical_frame`.
+`camera_imu_frame -> camera_color_optical_frame`. Nguồn sự thật hiện tại trong
+workspace là file `/home/tyler/Desktop/bku-vio/tf_static_extrinsics.txt`.
 
-Transform D455/HCMUT đang dùng cho smoke test:
+Transform D455/HCMUT đang dùng cho smoke test, trích từ
+`tf_static_extrinsics.txt`:
 
 ```text
 R =
-[[ 0.999996654005,  0.001598738420, -0.002033719299],
- [-0.001599047141,  0.999998710246, -0.000150184164],
- [ 0.002033476571,  0.000153435674,  0.999997920713]]
+[[ 0.999996654005,  0.001598738436, -0.002033719319],
+ [-0.001599047157,  0.999998710246, -0.000150184165],
+ [ 0.002033476591,  0.000153435676,  0.999997920713]]
 t = [0.028793809935, 0.007352355558, 0.015779949041]
 ```
 
@@ -159,6 +162,14 @@ late-run drift cần tiếp tục debug trước khi coi là accuracy-ready.
   jitter nhỏ khi cần, và PSD guard sau update để giữ covariance hợp lệ.
 - **Validation outcome:** Không còn collapse tại cửa sổ `183→184` trên path
   HCMUT smoke; regression tests pass; EuRoC harness tiếp tục ổn định.
+
+### Milestone M6 status
+
+- `tools/run_m6_eval.py` và replay harnesses đã tạo phần scaffolding đầu tiên
+  cho M6.
+- M6 hiện ở trạng thái **evaluation in progress** trong thực tế:
+  systematic evaluation artifacts đang hình thành, nhưng chưa khóa thành bộ
+  metric/baseline chính thức và chưa bắt đầu nhánh Raspberry Pi 5.
 
 ## 5. Verification
 
