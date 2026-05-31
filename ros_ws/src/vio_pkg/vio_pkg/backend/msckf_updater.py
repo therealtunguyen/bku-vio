@@ -28,6 +28,7 @@ class MSCKFUpdater:
         self.max_batch_dx_vel_norm = 1.0
         self.max_batch_dx_bias_norm = 0.25
         self.max_update_condition_number = 1e12
+        self.max_covariance_trace_shrink_ratio = 20.0
 
         # EuRoC MAV cam0 defaults. Other bags can override these through
         # VIOSystemNode ROS parameters.
@@ -410,7 +411,16 @@ class MSCKFUpdater:
             return False
         P = self.state_server.covariance
         S = H_xo @ P @ H_xo.T + np.eye(dof) * self.measurement_noise
-        gamma = r_o @ np.linalg.solve(S, r_o)
+        if not np.all(np.isfinite(S)):
+            return False
+        solved, innovation_condition_number = self._solve_regularized_system(S, r_o)
+        if solved is None:
+            return False
+        if innovation_condition_number > self.max_update_condition_number:
+            return False
+        gamma = float(r_o @ solved)
+        if not np.isfinite(gamma):
+            return False
         thresh = _CHI2_THRESH.get(dof, chi2.ppf(0.95, dof))
         return gamma < thresh
 
@@ -419,12 +429,18 @@ class MSCKFUpdater:
         Project onto the left nullspace of the feature Jacobian to remove
         the 3D feature representation (Marginalization).
         """
-        # QR Decomposition
-        Q, R = linalg.qr(H_f, mode='full')
-        
-        # Left nullspace is columns of Q beyond rank (which is 3)
-        Q_n = Q[:, 3:]
-        
+        U, singular_values, _ = np.linalg.svd(H_f, full_matrices=True)
+        if singular_values.size == 0:
+            return None, None
+        sv_tol = np.finfo(np.float64).eps * max(H_f.shape) * max(
+            float(np.max(singular_values)),
+            1.0,
+        )
+        rank = int(np.sum(singular_values > sv_tol))
+        Q_n = U[:, rank:]
+        if Q_n.shape[1] == 0:
+            return None, None
+
         H_xo = Q_n.T @ H_x
         r_o = Q_n.T @ r
         
@@ -459,13 +475,16 @@ class MSCKFUpdater:
             self.last_innovation_condition_number = float("inf")
             return np.zeros(P.shape[0])
 
-        self.last_innovation_condition_number = float(np.linalg.cond(S))
+        K, innovation_condition_number = self._solve_kalman_gain(P, H_th, S)
+        self.last_innovation_condition_number = innovation_condition_number
         if self.last_innovation_condition_number > self.max_update_condition_number:
             self.last_batch_rejected = True
             self.last_rejection_reason = "ill_conditioned"
             return np.zeros(P.shape[0])
-
-        K = P @ H_th.T @ linalg.inv(S)
+        if K is None:
+            self.last_batch_rejected = True
+            self.last_rejection_reason = "ill_conditioned"
+            return np.zeros(P.shape[0])
 
         # Update State
         dx = K @ r_th
@@ -475,14 +494,99 @@ class MSCKFUpdater:
             self.last_rejection_reason = "unreasonable_dx"
             return dx
 
-        self.apply_state_update(dx)
-
         # Update Covariance using Joseph form for better numerical stability.
         I_KH = np.eye(P.shape[0]) - K @ H_th
-        self.state_server.covariance = I_KH @ P @ I_KH.T + K @ R_n @ K.T
+        updated_covariance = I_KH @ P @ I_KH.T + K @ R_n @ K.T
         # Enforce symmetry
-        self.state_server.covariance = (self.state_server.covariance + self.state_server.covariance.T) / 2.0
+        updated_covariance = (updated_covariance + updated_covariance.T) / 2.0
+        min_eig = float(np.min(np.linalg.eigvalsh(updated_covariance)))
+        if min_eig < -1e-10:
+            updated_covariance += (
+                np.eye(updated_covariance.shape[0]) * (-min_eig + 1e-12)
+            )
+            updated_covariance = (updated_covariance + updated_covariance.T) / 2.0
+
+        prior_pos_trace = float(np.trace(P[0:3, 0:3]))
+        prior_vel_trace = float(np.trace(P[3:6, 3:6]))
+        post_pos_trace = float(np.trace(updated_covariance[0:3, 0:3]))
+        post_vel_trace = float(np.trace(updated_covariance[3:6, 3:6]))
+        pos_shrink_ratio = prior_pos_trace / max(post_pos_trace, 1e-12)
+        vel_shrink_ratio = prior_vel_trace / max(post_vel_trace, 1e-12)
+        if (
+            pos_shrink_ratio > self.max_covariance_trace_shrink_ratio
+            or vel_shrink_ratio > self.max_covariance_trace_shrink_ratio
+        ):
+            self.last_batch_rejected = True
+            self.last_rejection_reason = "ill_conditioned"
+            self.last_innovation_condition_number = float("inf")
+            return np.zeros(P.shape[0])
+
+        self.apply_state_update(dx)
+        self.state_server.covariance = updated_covariance
         return dx
+
+    def _solve_regularized_system(
+        self,
+        S: np.ndarray,
+        rhs: np.ndarray,
+    ) -> tuple[np.ndarray | None, float]:
+        """Solve Sx=rhs using bounded diagonal jitter and condition guards."""
+        S_sym = (S + S.T) / 2.0
+        dim = S_sym.shape[0]
+        if dim == 0:
+            return np.zeros_like(rhs), 0.0
+
+        average_diag = float(np.trace(S_sym)) / float(dim)
+        jitter_base = max(
+            np.finfo(np.float64).eps * max(abs(average_diag), 1.0),
+            1e-12,
+        )
+        jitter_attempts = (0.0, jitter_base, 10.0 * jitter_base, 100.0 * jitter_base)
+        diag_idx = np.diag_indices(dim)
+
+        for jitter in jitter_attempts:
+            S_reg = S_sym.copy()
+            if jitter > 0.0:
+                S_reg[diag_idx] += jitter
+            if not np.all(np.isfinite(S_reg)):
+                continue
+
+            try:
+                chol_factor = linalg.cho_factor(S_reg, lower=True, check_finite=False)
+                solved = linalg.cho_solve(chol_factor, rhs, check_finite=False)
+            except linalg.LinAlgError:
+                try:
+                    solved = linalg.solve(
+                        S_reg,
+                        rhs,
+                        assume_a="sym",
+                        check_finite=False,
+                    )
+                except linalg.LinAlgError:
+                    continue
+
+            if not np.all(np.isfinite(solved)):
+                continue
+
+            return solved, float(np.linalg.cond(S_reg))
+
+        return None, float("inf")
+
+    def _solve_kalman_gain(
+        self,
+        P: np.ndarray,
+        H_th: np.ndarray,
+        S: np.ndarray,
+    ) -> tuple[np.ndarray | None, float]:
+        """
+        Solve K = P H^T S^{-1} without forming an explicit matrix inverse.
+        Applies bounded diagonal jitter when S is near singular.
+        """
+        PH_t = P @ H_th.T
+        gain_rhs, innovation_condition_number = self._solve_regularized_system(S, PH_t.T)
+        if gain_rhs is None:
+            return None, innovation_condition_number
+        return gain_rhs.T, innovation_condition_number
 
     def _is_unreasonable_update(self, dx: np.ndarray) -> bool:
         if not np.all(np.isfinite(dx)):

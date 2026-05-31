@@ -147,6 +147,19 @@ và `first_divergence=processed_frame:181, raw_image:201, vel_norm:0.177831`.
 Điều này không làm hỏng smoke check hiện tại, nhưng cho thấy path HCMUT vẫn còn
 late-run drift cần tiếp tục debug trước khi coi là accuracy-ready.
 
+### Remediation update: HCMUT collapse around frame 183→184
+
+- **Observed symptom:** Trên HCMUT/D455, trajectory từng sụp đổ đột ngột trong
+  cửa sổ frame `183→184` sau giai đoạn chạy ổn định ban đầu.
+- **Root cause:** Điều kiện số của bước MSCKF update trở nên xấu; khi nullspace
+  projection thiếu ổn định theo hạng và covariance co quá mức, filter trở nên
+  over-contractive và mất ổn định.
+- **Implemented fix:** Bổ sung pipeline ổn định update gồm
+  rank-aware nullspace, shrink guard cho covariance, stable linear solve kèm
+  jitter nhỏ khi cần, và PSD guard sau update để giữ covariance hợp lệ.
+- **Validation outcome:** Không còn collapse tại cửa sổ `183→184` trên path
+  HCMUT smoke; regression tests pass; EuRoC harness tiếp tục ổn định.
+
 ## 5. Verification
 
 Chạy trong Docker container:

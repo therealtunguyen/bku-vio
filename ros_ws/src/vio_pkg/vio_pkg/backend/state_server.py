@@ -153,7 +153,7 @@ class StateServer:
         """
         if not self.state.clone_poses:
             return
-            
+
         # The oldest clone is the first one in the list
         self.state.clone_poses.pop(0)
         
@@ -164,7 +164,15 @@ class StateServer:
         indices_to_keep = list(range(15)) + list(range(21, n_rows))
         
         # Slice the covariance matrix to drop rows and columns 15:20
-        self.covariance = P[np.ix_(indices_to_keep, indices_to_keep)]
+        reduced_covariance = P[np.ix_(indices_to_keep, indices_to_keep)]
+        reduced_covariance = (reduced_covariance + reduced_covariance.T) / 2.0
+        min_eig = float(np.min(np.linalg.eigvalsh(reduced_covariance)))
+        if min_eig < -1e-10:
+            reduced_covariance += (
+                np.eye(reduced_covariance.shape[0]) * (-min_eig + 1e-12)
+            )
+            reduced_covariance = (reduced_covariance + reduced_covariance.T) / 2.0
+        self.covariance = reduced_covariance
 
     def clear_clones(self):
         """Drop all camera clones and shrink covariance back to the IMU state."""
