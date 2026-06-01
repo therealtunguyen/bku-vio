@@ -46,6 +46,14 @@ def generate_launch_description():
         default_value="true",
         description="Whether to publish the debug image topic.",
     )
+    image_processing_width_arg = DeclareLaunchArgument(
+        "image_processing_width",
+        default_value="0",
+        description=(
+            "Resize images to this width before tracking. "
+            "0 keeps the original width."
+        ),
+    )
     log_tracked_frames_arg = DeclareLaunchArgument(
         "log_tracked_frames",
         default_value="true",
@@ -66,6 +74,7 @@ def generate_launch_description():
         "diagnostics_log_every_n_frames"
     )
     publish_debug_image = LaunchConfiguration("publish_debug_image")
+    image_processing_width = LaunchConfiguration("image_processing_width")
     log_tracked_frames = LaunchConfiguration("log_tracked_frames")
     stop_after_processed_frames = LaunchConfiguration("stop_after_processed_frames")
 
@@ -93,6 +102,7 @@ def generate_launch_description():
             runtime_diagnostics_enabled_arg,
             diagnostics_log_every_n_frames_arg,
             publish_debug_image_arg,
+            image_processing_width_arg,
             log_tracked_frames_arg,
             stop_after_processed_frames_arg,
             # 1. Rosbag player
@@ -125,6 +135,10 @@ def generate_launch_description():
                         "publish_debug_image": ParameterValue(
                             publish_debug_image,
                             value_type=bool,
+                        ),
+                        "image_processing_width": ParameterValue(
+                            image_processing_width,
+                            value_type=int,
                         ),
                         "log_tracked_frames": ParameterValue(
                             log_tracked_frames,

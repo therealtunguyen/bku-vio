@@ -56,16 +56,18 @@ def test_get_case_config_rejects_unknown_case_name():
         module.get_case_config("not_a_real_case")
 
 
-def test_get_case_config_uses_headless_euroc_automation_profile():
+def test_get_case_config_uses_conservative_euroc_automation_profile():
     module = load_run_m6_eval_module()
 
     case_config = module.get_case_config("euroc_v101_easy")
     launch_args = dict(case_config["static_launch_args"])
 
-    assert launch_args["bag_rate"] == "0.1"
+    assert launch_args["bag_rate"] == "0.15"
     assert launch_args["enable_rviz"] == "false"
     assert launch_args["publish_debug_image"] == "false"
+    assert launch_args["image_processing_width"] == "640"
     assert launch_args["log_tracked_frames"] == "false"
+    assert "runtime_diagnostics_enabled" not in launch_args
 
 
 def test_read_expected_message_count_reads_synthetic_rosbag2_metadata(tmp_path):

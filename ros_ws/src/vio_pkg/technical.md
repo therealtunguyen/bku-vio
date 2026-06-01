@@ -16,7 +16,7 @@ Tự implement lõi (core) toán học và Computer Vision vào khung (skeleton)
   - `feature_manager.py`: Lọc điểm nhiễu (RANSAC) và quản lý ID.
   - -> Output: Sinh ra tập điểm theo dõi bền bỉ để chuyển đi (`MatureFeatures`).
 - **Phase 3 (IMU Propagation - File `backend/propagator.py`):** Cài đặt tích phân Kinematics RK4 để nhích (predict) Trạng thái Tương lai của Vị trí, Vận tốc, Sai số (Bias) và sinh ma trận hiệp phương sai Covariance.
-- **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch. Phase này đã hoàn thành cho EuRoC `V1_01_easy`; hệ thống đạt mục tiêu ATE RMSE < 1.0 m khi đánh giá bằng `evo` với SE(3) alignment, không scale correction. Replay full-run gần nhất trên EuRoC ghi nhận ATE RMSE `0.134976 m` với `2891` odometry poses, không có queue-drop warnings, và không có worker crashes, phù hợp với mốc full-run `0.132867 m` đã ghi nhận trước đó.
+- **Phase 4 (MSCKF Backend - File `backend/msckf_updater.py` & `state_server.py`):** Viết kỹ thuật Gauss-Newton Triangulation để cố định các điểm 3D ngoài đời thực mường tượng được từ Camera. Tối ưu hóa Error-state Jacobian thông qua Null-Space QR Decomposition, kết thúc bằng quá trình Update dữ liệu vào State Mạch. Phase này đã hoàn thành cho EuRoC `V1_01_easy`; hệ thống đạt mục tiêu ATE RMSE < 1.0 m khi đánh giá bằng `evo` với SE(3) alignment, không scale correction. Baseline full-run đã xác nhận trước đó trên EuRoC ghi nhận ATE RMSE `0.134976 m` với `2891` odometry poses, không có queue-drop warnings, và không có worker crashes, phù hợp với mốc full-run `0.132867 m` đã ghi nhận trước đó. Đây vẫn là mốc tham chiếu, nhưng không nên gọi là “kết quả runner hiện tại” vì path M6 automation đang được siết lại riêng.
 - **Phase 5 (Pure VIO Hardening):** Khóa scope về pure VIO/MSCKF. Trọng tâm là giữ baseline EuRoC M4 reproducible, tăng độ ổn định runtime, và debug path HCMUT/D455 như smoke test mà không tạo estimator mode mới.
 
 ## 3. Cách Thiết Kế (Architecture & Design Pattern)
@@ -170,6 +170,17 @@ late-run drift cần tiếp tục debug trước khi coi là accuracy-ready.
 - M6 hiện ở trạng thái **evaluation in progress** trong thực tế:
   systematic evaluation artifacts đang hình thành, nhưng chưa khóa thành bộ
   metric/baseline chính thức và chưa bắt đầu nhánh Raspberry Pi 5.
+- EuRoC M6 automation profile bảo thủ hiện tại:
+  - `bag_rate=0.15`
+  - `image_processing_width=640`
+  - `publish_debug_image=false`
+  - `log_tracked_frames=false`
+- Live verification hiện tại cho profile này:
+  - direct-launch slice `300` frames chạy sạch, không queue-full, không
+    forward-gap skip
+  - full scripted `run_m6_eval.py --case euroc_v101_easy` vẫn có late-run
+    `Image queue full` và `Skipping visual update after large forward image gap`
+    nên chưa acceptance-ready
 
 ## 5. Verification
 
@@ -199,12 +210,23 @@ Expected EuRoC runtime log includes:
 Input sensor QoS reliability: reliable
 ```
 
-Kết quả full replay EuRoC gần nhất:
+M6 automation verification đang dùng profile EuRoC bảo thủ riêng:
 
-- ATE RMSE `0.134976 m`
-- `2891` odometry poses
-- `0` queue-drop warnings
-- `0` worker crashes
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/ubuntu/VIO/ros_ws
+source install/setup.bash
+python3 /home/ubuntu/VIO/tools/run_m6_eval.py --case euroc_v101_easy
+```
+
+Trạng thái verification EuRoC hiện tại nên hiểu như sau:
+
+- **Historical full-run baseline preserved:** ATE RMSE `0.134976 m`,
+  `2891` odometry poses, `0` queue-drop warnings, `0` worker crashes
+- **Current M6 runner profile:** direct-launch slice ổn định ở `bag_rate=0.15`
+  + `image_processing_width=640`
+- **Current full scripted M6 case:** vẫn có late-run `Image queue full` và
+  `Skipping visual update after large forward image gap: dt_img=0.1000s`
 
 ## 6. Deliverables
 - Skeleton Data Flow Pipeline Python bảo mật tránh rò rỉ RAM rớt FPS.

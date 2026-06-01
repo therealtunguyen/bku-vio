@@ -35,9 +35,10 @@ CASE_CONFIGS: dict[str, dict[str, Any]] = {
         "dataset_arg_name": "dataset_dir",
         "dataset_arg_kind": "root",
         "static_launch_args": (
-            ("bag_rate", "0.1"),
+            ("bag_rate", "0.15"),
             ("enable_rviz", "false"),
             ("publish_debug_image", "false"),
+            ("image_processing_width", "640"),
             ("log_tracked_frames", "false"),
         ),
         "expected_paths": ("V1_01_easy", "V1_01_easy/metadata.yaml"),

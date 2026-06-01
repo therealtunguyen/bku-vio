@@ -14,10 +14,14 @@
 ## 0. Trạng thái hiện tại
 
 - M4 MSCKF measurement update đã hoàn thành trên EuRoC `V1_01_easy`.
-- Kết quả replay EuRoC full-run mới nhất với runner hiện tại đạt ATE RMSE
-  `0.134976 m`, ghi nhận `2891` odometry poses, không có queue-drop warnings,
-  và không có worker crashes; đây là mốc full-run nên dùng để đối chiếu cho
-  các lần chạy sau.
+- Baseline EuRoC full-run đã xác nhận trước đó vẫn được giữ làm mốc đối chiếu:
+  ATE RMSE `0.134976 m`, `2891` odometry poses, không có queue-drop warnings,
+  và không có worker crashes.
+- Tuy nhiên, runner M6 hiện tại chưa khép lại full-run EuRoC ở trạng thái
+  acceptance-ready. Profile automation bảo thủ mới nhất đã được hạ còn
+  `bag_rate=0.15` và `image_processing_width=640`; slice xác minh ngắn chạy
+  ổn định, nhưng full scripted run vẫn có thể phát sinh `Image queue full` và
+  `Skipping visual update after large forward image gap`.
 - Project scope hiện là pure VIO/MSCKF; không còn nhánh ArUco trong kế hoạch.
 - Launch mặc định vẫn chạy EuRoC với calibration EuRoC:
   - Intrinsics/distortion mặc định nằm trong `backend/msckf_updater.py`.
@@ -155,6 +159,18 @@ ros2 launch vio_pkg vio_system.launch.py bag_rate:=0.2
 ros2 launch vio_pkg vio_system.launch.py dataset_dir:=/home/ubuntu/VIO/dataset bag_rate:=0.2
 ```
 
+Profile M6 automation bảo thủ hiện tại cho EuRoC:
+
+```bash
+ros2 launch vio_pkg vio_system.launch.py \
+  dataset_dir:=/home/ubuntu/VIO/dataset \
+  bag_rate:=0.15 \
+  image_processing_width:=640 \
+  enable_rviz:=false \
+  publish_debug_image:=false \
+  log_tracked_frames:=false
+```
+
 Trong log của node, với EuRoC bạn nên thấy:
 
 ```text
@@ -211,8 +227,8 @@ t = [0.028793809935, 0.007352355558, 0.015779949041]
 Milestone status hiện tại:
 - M5 pure-VIO hardening: hoàn tất theo scope local docs
 - M6: đã bắt đầu phần evaluation scaffolding (`tools/run_m6_eval.py`, replay
-  harness HCMUT/EuRoC), nhưng chưa khóa systematic metrics/reporting và chưa
-  bắt đầu nhánh RPi 5
+  harness HCMUT/EuRoC), nhưng chưa khóa full-run EuRoC automation path,
+  chưa khóa systematic metrics/reporting, và chưa bắt đầu nhánh RPi 5
 
 Có thể dùng launch preset:
 
