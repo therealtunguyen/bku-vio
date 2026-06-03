@@ -11,12 +11,11 @@ Run inside the ROS 2 container after sourcing ROS:
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import subprocess
+import zipfile
 from pathlib import Path
-
-from rclpy.serialization import deserialize_message
-from rosidl_runtime_py.utilities import get_message
 
 
 ODOM_TOPIC = "/vio/odometry"
@@ -44,7 +43,15 @@ def bag_databases(bag_dir: Path) -> list[Path]:
     return db_paths
 
 
-def export_tum(bag_dir: Path, output_dir: Path) -> tuple[Path, Path]:
+def _load_ros_message_helpers():
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
+
+    return deserialize_message, get_message
+
+
+def export_tum(bag_dir: Path, output_dir: Path) -> tuple[Path, Path, int, int]:
+    deserialize_message, get_message = _load_ros_message_helpers()
     output_dir.mkdir(parents=True, exist_ok=True)
     vio_path = output_dir / "vio_odom.tum"
     gt_path = output_dir / "vio_gt_path.tum"
@@ -96,10 +103,34 @@ def export_tum(bag_dir: Path, output_dir: Path) -> tuple[Path, Path]:
 
     print(f"Exported {len(odom_lines)} odometry poses to {vio_path}")
     print(f"Exported {len(gt_by_timestamp)} GT poses to {gt_path}")
-    return vio_path, gt_path
+    return vio_path, gt_path, len(odom_lines), len(gt_by_timestamp)
 
 
-def run_evo(output_dir: Path, vio_path: Path, gt_path: Path) -> None:
+def _normalize_alignment(info: dict[str, object]) -> str:
+    title = str(info.get("title", "")).lower()
+    if "sim(3)" in title:
+        return "sim3"
+    if "se(3)" in title:
+        return "se3"
+    return "unknown"
+
+
+def read_evo_stats(result_path: Path) -> dict[str, object]:
+    if not result_path.is_file():
+        return {}
+
+    with zipfile.ZipFile(result_path) as archive:
+        info = json.loads(archive.read("info.json").decode("utf-8"))
+        stats = json.loads(archive.read("stats.json").decode("utf-8"))
+
+    payload: dict[str, object] = dict(stats)
+    payload["info"] = info
+    payload["alignment"] = _normalize_alignment(info)
+    payload["scale_correction"] = payload["alignment"] == "sim3"
+    return payload
+
+
+def run_evo(output_dir: Path, vio_path: Path, gt_path: Path) -> dict[str, dict[str, object]]:
     for result_name in ("ape_aligned.zip", "rpe_1m_aligned.zip"):
         result_path = output_dir / result_name
         if result_path.exists():
@@ -136,19 +167,36 @@ def run_evo(output_dir: Path, vio_path: Path, gt_path: Path) -> None:
     for command in commands:
         print("\n$ " + " ".join(command))
         subprocess.run(command, check=True)
+    return {
+        "ape_translation": read_evo_stats(output_dir / "ape_aligned.zip"),
+        "rpe_translation_1m": read_evo_stats(output_dir / "rpe_1m_aligned.zip"),
+    }
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("bag_dir", type=Path)
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--skip-evo", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
 
-    vio_path, gt_path = export_tum(args.bag_dir, args.output_dir)
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    vio_path, gt_path, odometry_poses, gt_poses = export_tum(args.bag_dir, args.output_dir)
+    summary: dict[str, object] = {
+        "odometry_poses": odometry_poses,
+        "gt_poses": gt_poses,
+        "evo": {},
+    }
     if not args.skip_evo:
-        run_evo(args.output_dir, vio_path, gt_path)
+        summary["evo"] = run_evo(args.output_dir, vio_path, gt_path)
+    summary_path = args.output_dir / "evaluation_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"evaluation_summary={summary_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

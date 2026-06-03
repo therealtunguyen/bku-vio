@@ -165,22 +165,48 @@ late-run drift cần tiếp tục debug trước khi coi là accuracy-ready.
 
 ### Milestone M6 status
 
-- `tools/run_m6_eval.py` và replay harnesses đã tạo phần scaffolding đầu tiên
-  cho M6.
-- M6 hiện ở trạng thái **evaluation in progress** trong thực tế:
-  systematic evaluation artifacts đang hình thành, nhưng chưa khóa thành bộ
-  metric/baseline chính thức và chưa bắt đầu nhánh Raspberry Pi 5.
-- EuRoC M6 automation profile bảo thủ hiện tại:
-  - `bag_rate=0.15`
+M6 pass/fail is defined by `M6_ACCEPTANCE.md` and its machine-readable source
+of truth, `tools/m6_acceptance.json`. Narrative status notes must not override
+the latest authoritative `m6_report.json`.
+
+M6 workstation evaluation gate passed using the authoritative report at
+`/home/ubuntu/VIO/results/m6_workstation_acceptance/m6_report.json`.
+Raspberry Pi 5 verification may begin. Target-hardware verification is still
+open until the matrix in `RPI5_VERIFICATION.md` is executed on the device.
+
+- Promoted EuRoC M6 profile in the authoritative runner:
+  - `bag_rate=0.10`
   - `image_processing_width=640`
   - `publish_debug_image=false`
   - `log_tracked_frames=false`
-- Live verification hiện tại cho profile này:
-  - direct-launch slice `300` frames chạy sạch, không queue-full, không
-    forward-gap skip
-  - full scripted `run_m6_eval.py --case euroc_v101_easy` vẫn có late-run
-    `Image queue full` và `Skipping visual update after large forward image gap`
-    nên chưa acceptance-ready
+  - `runtime_diagnostics_enabled=true`
+  - `diagnostics_log_every_n_frames=10`
+- Accepted EuRoC workstation facts from the report:
+  - `odometry_poses=2891`
+  - `ape_translation_rmse_m=0.1419649963884283`
+  - `rpe_translation_1m_rmse_m=0.0954034326110991`
+  - `image_queue_full=0`
+  - `large_forward_gap_skips=0`
+  - `worker_crashes=0`
+- Accepted HCMUT smoke facts from the same report:
+  - `smoke_check.ok=true`
+  - `accepted_updates=3`
+  - `image_queue_full=0`
+  - `frame_gap_resets=0`
+  - `imu_init_resets=0`
+- Runtime caveat kept visible for HCMUT:
+  - `runtime_health.large_forward_gap_skips=7`
+  - HCMUT therefore remains a smoke and replay-debug path, not a metric
+    benchmark, even though the current smoke gate passed.
+
+The HCMUT frame-181 replay investigation is closed as a diagnostic
+classification. The local evidence note is
+`docs/evaluation/2026-06-01-hcmut-frame181-investigation-closure.md`; the
+authoritative machine artifact is emitted by
+`ros_ws/src/vio_pkg/test/tools/compare_onset_windows.py`. The current
+classification is `propagation_side`, with exact next fix target:
+inspect gravity-compensated IMU state evolution in `backend/propagator.py`
+and static initialization before changing MSCKF update logic.
 
 ## 5. Verification
 
@@ -223,10 +249,10 @@ Trạng thái verification EuRoC hiện tại nên hiểu như sau:
 
 - **Historical full-run baseline preserved:** ATE RMSE `0.134976 m`,
   `2891` odometry poses, `0` queue-drop warnings, `0` worker crashes
-- **Current M6 runner profile:** direct-launch slice ổn định ở `bag_rate=0.15`
-  + `image_processing_width=640`
-- **Current full scripted M6 case:** vẫn có late-run `Image queue full` và
-  `Skipping visual update after large forward image gap: dt_img=0.1000s`
+- **Current M6 runner profile:** accepted workstation profile ở
+  `bag_rate=0.10` + `image_processing_width=640`
+- **Current full scripted M6 case:** authoritative `m6_report.json` hiện tại
+  đã xanh trên workstation results root nêu ở trên
 
 ## 6. Deliverables
 - Skeleton Data Flow Pipeline Python bảo mật tránh rò rỉ RAM rớt FPS.

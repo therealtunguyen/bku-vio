@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,75 @@ from typing import Any
 DEFAULT_DATASET_ROOT = Path("/home/ubuntu/VIO/dataset")
 DEFAULT_WORKSPACE_ROOT = Path("/home/ubuntu/VIO/ros_ws")
 DEFAULT_REPO_ROOT = Path("/home/ubuntu/VIO")
+DEFAULT_ACCEPTANCE_CONTRACT = Path(__file__).with_name("m6_acceptance.json")
 RESULT_TOPICS_WITH_GT = ("/vio/odometry", "/vio/gt_path")
 RESULT_TOPICS_SMOKE = ("/vio/odometry",)
+
+DEFAULT_ACCEPTANCE_CONTRACT_DATA: dict[str, Any] = {
+    "schema_version": 1,
+    "euroc_v101_easy": {
+        "runtime": {
+            "timed_out": False,
+            "worker_crashes": 0,
+            "image_queue_full": 0,
+            "large_forward_gap_skips": 0,
+            "large_image_timestamp_gaps": 0,
+            "imu_init_resets": 0,
+            "minimum_odometry_poses": 2800,
+        },
+        "metrics": {
+            "ape_translation_rmse_m_max": 1.0,
+            "baseline_regression_warning_rmse_m_max": 0.25,
+            "require_rpe_translation_rmse": True,
+            "alignment": "se3",
+            "scale_correction": False,
+        },
+        "replay": {
+            "minimum_processed_frames": 400,
+            "discontinuities": 0,
+            "segment_replay_matches": True,
+        },
+    },
+    "hcmut_d455_smoke": {
+        "runtime": {
+            "timed_out": False,
+            "worker_crashes": 0,
+            "image_queue_full": 0,
+            "large_image_timestamp_gaps": 0,
+            "frame_gap_resets": 0,
+            "imu_init_resets": 0,
+            "minimum_accepted_updates": 1,
+        },
+        "replay": {
+            "minimum_processed_frames": 260,
+            "discontinuities": 0,
+            "segment_replay_matches": True,
+            "require_onset_report": True,
+            "require_classification": True,
+            "accuracy_gate": False,
+        },
+    },
+    "report": {
+        "required_case_fields": [
+            "case",
+            "config",
+            "run",
+            "runtime_health",
+            "checks",
+            "ok",
+            "summary_path",
+        ],
+        "required_overall_fields": [
+            "schema_version",
+            "generated_at_utc",
+            "contract_path",
+            "cases",
+            "replay",
+            "checks",
+            "ok",
+        ],
+    },
+}
 
 CASE_CONFIGS: dict[str, dict[str, Any]] = {
     "euroc_v101_easy": {
@@ -35,11 +103,13 @@ CASE_CONFIGS: dict[str, dict[str, Any]] = {
         "dataset_arg_name": "dataset_dir",
         "dataset_arg_kind": "root",
         "static_launch_args": (
-            ("bag_rate", "0.15"),
+            ("bag_rate", "0.10"),
             ("enable_rviz", "false"),
             ("publish_debug_image", "false"),
             ("image_processing_width", "640"),
             ("log_tracked_frames", "false"),
+            ("runtime_diagnostics_enabled", "true"),
+            ("diagnostics_log_every_n_frames", "10"),
         ),
         "expected_paths": ("V1_01_easy", "V1_01_easy/metadata.yaml"),
     },
@@ -64,6 +134,35 @@ def get_case_config(case_name: str) -> dict[str, Any]:
     if case_name not in CASE_CONFIGS:
         raise KeyError(f"Unknown case: {case_name}")
     return dict(CASE_CONFIGS[case_name])
+
+
+def apply_launch_arg_overrides(
+    case: dict[str, Any],
+    overrides: tuple[str, ...] | list[str],
+) -> dict[str, Any]:
+    launch_args = dict(case["static_launch_args"])
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"Launch override must use NAME=VALUE syntax: {item!r}")
+        name, value = item.split("=", 1)
+        if not name or not value:
+            raise ValueError(f"Launch override must use NAME=VALUE syntax: {item!r}")
+        launch_args[name] = value
+    updated = dict(case)
+    updated["static_launch_args"] = tuple(launch_args.items())
+    return updated
+
+
+def resolve_requested_frames(
+    configured_frames: int | None,
+    *,
+    expected_frames: int,
+) -> int:
+    if configured_frames is None:
+        return expected_frames
+    if configured_frames < 1:
+        raise ValueError("--stop-after-processed-frames must be positive")
+    return configured_frames
 
 
 def _parse_scalar(text: str) -> str:
@@ -184,6 +283,106 @@ def extract_runtime_diagnostics(log_text: str) -> dict[str, float | int]:
         else:
             diagnostics[key] = _parse_number(match.group(1))
     return diagnostics
+
+
+def extract_runtime_health(log_text: str) -> dict[str, Any]:
+    samples = [
+        extract_runtime_diagnostics(f"Runtime diagnostics: {payload}")
+        for payload in re.findall(r"Runtime diagnostics:\s*(.*)", log_text)
+    ]
+    samples = [sample for sample in samples if sample]
+    queue_warning_count = len(re.findall(r"image queue full", log_text, flags=re.I))
+    forward_gap_skips = len(
+        re.findall(r"Skipping visual update after large forward image gap:", log_text)
+    )
+    large_image_timestamp_gaps = len(
+        re.findall(r"Large image timestamp gap:", log_text)
+    )
+    frame_gap_matches = re.findall(
+        (
+            r"Resetting temporal state after image timestamp discontinuity: "
+            r"(?:kind=[^,]+,\s*)?dt_img=([-+0-9.eE]+)s"
+        ),
+        log_text,
+    )
+    frame_gap_resets = len(frame_gap_matches)
+    backward_jump_resets = sum(float(value) <= 0.0 for value in frame_gap_matches)
+    forward_gap_resets = sum(float(value) > 0.0 for value in frame_gap_matches)
+    imu_init_resets = len(
+        re.findall(r"Resetting IMU init buffer after timestamp discontinuity", log_text)
+    )
+    intentional_shutdown = _is_intentional_launch_shutdown(log_text)
+    ordered_worker_crashes = len(re.findall(r"Ordered VIO Worker Crashed:", log_text))
+    generic_worker_crash = not intentional_shutdown and bool(
+        re.search(r"(process has died|Traceback)", log_text)
+    )
+    worker_crashes = ordered_worker_crashes or int(generic_worker_crash)
+
+    first_nonrecoverable = next(
+        (
+            sample
+            for sample in samples
+            if int(sample.get("dropped", 0)) > 0
+            or (
+                int(sample.get("queue_capacity", 0)) > 0
+                and int(sample.get("queue_size", 0))
+                >= int(sample["queue_capacity"]) - 1
+            )
+        ),
+        {},
+    )
+    latest = samples[-1] if samples else {}
+    peak_queue_size = max(
+        (int(sample.get("queue_size", 0)) for sample in samples),
+        default=0,
+    )
+    peak_queue_capacity = max(
+        (int(sample.get("queue_capacity", 0)) for sample in samples),
+        default=0,
+    )
+
+    reasons: list[str] = []
+    if not samples:
+        reasons.append("missing runtime diagnostics")
+    if queue_warning_count > 0:
+        reasons.append(f"image queue full detected ({queue_warning_count})")
+    if forward_gap_skips > 0:
+        reasons.append(f"large forward gap skips detected ({forward_gap_skips})")
+    if large_image_timestamp_gaps > 0:
+        reasons.append(
+            f"large image timestamp gaps detected ({large_image_timestamp_gaps})"
+        )
+    if frame_gap_resets > 0:
+        reasons.append(f"frame-gap resets detected ({frame_gap_resets})")
+    if imu_init_resets > 0:
+        reasons.append(f"imu init resets detected ({imu_init_resets})")
+    if worker_crashes > 0:
+        reasons.append(f"worker crashes detected ({worker_crashes})")
+    if int(latest.get("dropped", 0)) > 0:
+        reasons.append(f"dropped frames detected ({int(latest.get('dropped', 0))})")
+
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "runtime_sample_count": len(samples),
+        "image_queue_full": queue_warning_count,
+        "large_forward_gap_skips": forward_gap_skips,
+        "large_image_timestamp_gaps": large_image_timestamp_gaps,
+        "frame_gap_resets": frame_gap_resets,
+        "backward_jump_resets": backward_jump_resets,
+        "forward_gap_resets": forward_gap_resets,
+        "imu_init_resets": imu_init_resets,
+        "worker_crashes": worker_crashes,
+        "peak_queue_size": peak_queue_size,
+        "peak_queue_capacity": peak_queue_capacity,
+        "latest_dropped": int(latest.get("dropped", 0)),
+        "latest_frame": int(latest.get("frame", -1)),
+        "first_nonrecoverable_queue_frame": int(first_nonrecoverable.get("frame", -1)),
+        "first_nonrecoverable_queue_size": int(
+            first_nonrecoverable.get("queue_size", -1)
+        ),
+        "latest_runtime_diagnostics": latest,
+    }
 
 
 def extract_evo_metrics(output_text: str) -> dict[str, float]:
@@ -494,12 +693,24 @@ def _run_evo(
     ]
     completed = _run_logged_command(command, eval_log, workspace_root, repo_root)
     combined_output = completed.stdout + "\n" + completed.stderr
+    evaluation_summary_path = eval_dir / "evaluation_summary.json"
+    evaluation_summary: dict[str, Any] = {}
+    if evaluation_summary_path.is_file():
+        evaluation_summary = json.loads(
+            evaluation_summary_path.read_text(encoding="utf-8")
+        )
+    compatibility_metrics = (
+        evaluation_summary.get("evo", {}).get("ape_translation", {})
+        or extract_evo_metrics(combined_output)
+    )
     return {
         "skipped": False,
         "returncode": completed.returncode,
         "log_path": str(eval_log),
         "output_dir": str(eval_dir),
-        "metrics": extract_evo_metrics(combined_output),
+        "evaluation_summary_path": str(evaluation_summary_path),
+        "evaluation_summary": evaluation_summary,
+        "metrics": compatibility_metrics,
     }
 
 
@@ -517,8 +728,228 @@ def _validate_case_paths(case: dict[str, Any], dataset_root: Path, workspace_roo
     return checks
 
 
-def run_case(case_name: str, args: argparse.Namespace) -> dict[str, Any]:
-    case = CASE_CONFIGS[case_name]
+def load_acceptance_contract(
+    path: Path | str = DEFAULT_ACCEPTANCE_CONTRACT,
+) -> dict[str, Any]:
+    contract_path = Path(path)
+    if contract_path.is_file():
+        return json.loads(contract_path.read_text(encoding="utf-8"))
+    return json.loads(json.dumps(DEFAULT_ACCEPTANCE_CONTRACT_DATA))
+
+
+def evaluate_euroc_case(
+    summary: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, bool]:
+    runtime = contract["runtime"]
+    metrics = contract["metrics"]
+    health = summary.get("runtime_health", {})
+    evaluation = summary.get("evo", {}).get("evaluation_summary", {})
+    evo = evaluation.get("evo", {})
+    ape = evo.get("ape_translation", {})
+    rpe = evo.get("rpe_translation_1m", {})
+    return {
+        "not_timed_out": summary.get("run", {}).get("timed_out") is runtime["timed_out"],
+        "worker_crashes": health.get("worker_crashes") == runtime["worker_crashes"],
+        "image_queue_full": health.get("image_queue_full") == runtime["image_queue_full"],
+        "large_forward_gap_skips": (
+            health.get("large_forward_gap_skips") == runtime["large_forward_gap_skips"]
+        ),
+        "large_image_timestamp_gaps": (
+            health.get("large_image_timestamp_gaps")
+            == runtime["large_image_timestamp_gaps"]
+        ),
+        "imu_init_resets": health.get("imu_init_resets") == runtime["imu_init_resets"],
+        "minimum_odometry_poses": (
+            evaluation.get("odometry_poses", 0) >= runtime["minimum_odometry_poses"]
+        ),
+        "evo_returncode": summary.get("evo", {}).get("returncode") == 0,
+        "ape_translation_rmse": (
+            ape.get("rmse", float("inf")) <= metrics["ape_translation_rmse_m_max"]
+        ),
+        "alignment": ape.get("alignment") == metrics["alignment"],
+        "scale_correction": ape.get("scale_correction") is metrics["scale_correction"],
+        "rpe_translation_present": (
+            (not metrics.get("require_rpe_translation_rmse", False))
+            or "rmse" in rpe
+        ),
+    }
+
+
+def collect_euroc_warnings(
+    summary: dict[str, Any],
+    contract: dict[str, Any],
+) -> list[str]:
+    metrics = contract["metrics"]
+    warning_threshold = metrics.get("baseline_regression_warning_rmse_m_max")
+    if warning_threshold is None:
+        return []
+    rmse = (
+        summary.get("evo", {})
+        .get("evaluation_summary", {})
+        .get("evo", {})
+        .get("ape_translation", {})
+        .get("rmse")
+    )
+    if rmse is None or rmse <= warning_threshold:
+        return []
+    return [
+        (
+            "APE translation RMSE exceeds regression warning threshold "
+            f"({rmse:.6f} > {warning_threshold:.6f})"
+        )
+    ]
+
+
+def evaluate_hcmut_case(
+    summary: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, bool]:
+    runtime = contract["runtime"]
+    health = summary.get("runtime_health", {})
+    smoke = summary.get("smoke_check", {})
+    return {
+        "not_timed_out": summary.get("run", {}).get("timed_out") is runtime["timed_out"],
+        "worker_crashes": health.get("worker_crashes") == runtime["worker_crashes"],
+        "image_queue_full": health.get("image_queue_full") == runtime["image_queue_full"],
+        "large_image_timestamp_gaps": (
+            health.get("large_image_timestamp_gaps")
+            == runtime["large_image_timestamp_gaps"]
+        ),
+        "frame_gap_resets": health.get("frame_gap_resets") == runtime["frame_gap_resets"],
+        "imu_init_resets": health.get("imu_init_resets") == runtime["imu_init_resets"],
+        "minimum_accepted_updates": (
+            smoke.get("accepted_updates", 0) >= runtime["minimum_accepted_updates"]
+        ),
+    }
+
+
+def _extract_replay_case_payload(payload: dict[str, Any], case_name: str) -> dict[str, Any]:
+    case_payload = payload.get(case_name, {})
+    if isinstance(case_payload.get("msckf"), dict):
+        return case_payload["msckf"]
+    return case_payload
+
+
+def _extract_replay_classification(payload: dict[str, Any]) -> str:
+    investigation = payload.get("investigation", {})
+    if investigation.get("classification"):
+        return str(investigation["classification"])
+    for case_name in ("hcmut", "euroc"):
+        case_payload = payload.get(case_name, {})
+        if case_payload.get("classification"):
+            return str(case_payload["classification"])
+        if case_payload.get("classification_hint"):
+            return str(case_payload["classification_hint"])
+    return ""
+
+
+def evaluate_replay_report(
+    payload: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, bool]:
+    euroc = _extract_replay_case_payload(payload, "euroc")
+    hcmut = _extract_replay_case_payload(payload, "hcmut")
+    euroc_contract = contract["euroc_v101_easy"]["replay"]
+    hcmut_contract = contract["hcmut_d455_smoke"]["replay"]
+    classification = _extract_replay_classification(payload)
+    return {
+        "euroc_processed_frames": (
+            euroc.get("processed_frames", 0) >= euroc_contract["minimum_processed_frames"]
+        ),
+        "euroc_discontinuities": (
+            euroc.get("discontinuities") == euroc_contract["discontinuities"]
+        ),
+        "euroc_segment_replay": (
+            euroc.get("segment_replay_matches")
+            is euroc_contract["segment_replay_matches"]
+        ),
+        "hcmut_processed_frames": (
+            hcmut.get("processed_frames", 0) >= hcmut_contract["minimum_processed_frames"]
+        ),
+        "hcmut_discontinuities": (
+            hcmut.get("discontinuities") == hcmut_contract["discontinuities"]
+        ),
+        "hcmut_segment_replay": (
+            hcmut.get("segment_replay_matches")
+            is hcmut_contract["segment_replay_matches"]
+        ),
+        "onset_report_present": (
+            not hcmut_contract.get("require_onset_report", False)
+            or bool(payload.get("hcmut")) or bool(payload.get("window"))
+        ),
+        "hcmut_classification": (
+            not hcmut_contract.get("require_classification", False)
+            or bool(classification)
+        ),
+    }
+
+
+def run_replay_comparison(
+    *,
+    repo_root: Path,
+    workspace_root: Path,
+    results_root: Path,
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    output_path = results_root / "hcmut_euroc_onset_report.json"
+    log_path = results_root / "run_logs" / "hcmut_euroc_onset_report.log"
+    command = [
+        sys.executable,
+        str(workspace_root / "src" / "vio_pkg" / "test" / "tools" / "compare_onset_windows.py"),
+        "--output",
+        str(output_path),
+    ]
+    completed = _run_logged_command(command, log_path, workspace_root, repo_root)
+    payload: dict[str, Any] = {}
+    if output_path.is_file():
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    checks = evaluate_replay_report(payload, contract)
+    return {
+        "ok": completed.returncode == 0 and bool(payload) and all(checks.values()),
+        "returncode": completed.returncode,
+        "log_path": str(log_path),
+        "report_path": str(output_path),
+        "report": payload,
+        "checks": checks,
+    }
+
+
+def build_overall_report(
+    *,
+    contract_path: str,
+    summaries: list[dict[str, Any]],
+    replay: dict[str, Any],
+    required_case_fields: tuple[str, ...] | list[str] = (),
+    required_overall_fields: tuple[str, ...] | list[str] = (),
+) -> dict[str, Any]:
+    checks = {
+        "cases": all(bool(summary.get("ok", False)) for summary in summaries),
+        "replay": bool(replay.get("ok", False)),
+        "case_required_fields": all(
+            all(key in summary for key in required_case_fields) for summary in summaries
+        ),
+    }
+    report = {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "contract_path": contract_path,
+        "cases": summaries,
+        "replay": replay,
+        "checks": checks,
+        "ok": False,
+    }
+    checks["required_fields"] = all(key in report for key in required_overall_fields)
+    report["ok"] = all(checks.values())
+    return report
+
+
+def run_case(
+    case_name: str,
+    args: argparse.Namespace,
+    contract_data: dict[str, Any],
+) -> dict[str, Any]:
+    case = apply_launch_arg_overrides(get_case_config(case_name), tuple(args.launch_arg))
     dataset_root = args.dataset_root.resolve()
     workspace_root = args.workspace_root.resolve()
     repo_root = args.repo_root.resolve()
@@ -528,13 +959,18 @@ def run_case(case_name: str, args: argparse.Namespace) -> dict[str, Any]:
 
     metadata_path = dataset_root / case["metadata_relpath"]
     expected_frames = read_expected_message_count(metadata_path, case["image_topic"])
+    requested_frames = resolve_requested_frames(
+        args.stop_after_processed_frames,
+        expected_frames=expected_frames,
+    )
     duration_seconds = _read_bag_duration_seconds(metadata_path)
     summary: dict[str, Any] = {
         "case": case["name"],
-        "config": get_case_config(case["name"]),
+        "config": case,
         "paths": _validate_case_paths(case, dataset_root, workspace_root, repo_root),
         "metadata_path": str(metadata_path),
         "expected_frames": expected_frames,
+        "requested_frames": requested_frames,
         "duration_seconds": duration_seconds,
         "run": {"skipped": args.skip_run},
         "evo": {"skipped": True},
@@ -547,7 +983,7 @@ def run_case(case_name: str, args: argparse.Namespace) -> dict[str, Any]:
             workspace_root=workspace_root,
             repo_root=repo_root,
             results_root=results_root,
-            expected_frames=expected_frames,
+            expected_frames=requested_frames,
             duration_seconds=duration_seconds,
         )
         summary["run"] = {"skipped": False, **run_summary}
@@ -557,10 +993,15 @@ def run_case(case_name: str, args: argparse.Namespace) -> dict[str, Any]:
             errors="replace",
         )
         summary["runtime_diagnostics"] = extract_runtime_diagnostics(launch_log_text)
+        summary["runtime_health"] = extract_runtime_health(launch_log_text)
         if case["name"] == "hcmut_d455_smoke":
             summary["smoke_check"] = check_hcmut_smoke_log(launch_log_text)
     else:
         summary["runtime_diagnostics"] = {}
+        summary["runtime_health"] = {
+            "ok": False,
+            "reasons": ["run skipped; no log available"],
+        }
         if case["name"] == "hcmut_d455_smoke":
             summary["smoke_check"] = {
                 "ok": False,
@@ -587,13 +1028,24 @@ def run_case(case_name: str, args: argparse.Namespace) -> dict[str, Any]:
     else:
         summary["evo"] = {"skipped": True, "reason": "ground truth not expected"}
 
+    if case["name"] == "euroc_v101_easy":
+        summary["checks"] = evaluate_euroc_case(summary, contract_data["euroc_v101_easy"])
+        summary["warnings"] = collect_euroc_warnings(
+            summary,
+            contract_data["euroc_v101_easy"],
+        )
+    else:
+        summary["checks"] = evaluate_hcmut_case(summary, contract_data["hcmut_d455_smoke"])
+        summary["warnings"] = []
+    summary["ok"] = all(summary["checks"].values())
+
     summary_path = _case_summary_path(results_root, case["name"])
     summary["summary_path"] = str(summary_path)
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     return summary
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case",
@@ -606,21 +1058,63 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=DEFAULT_REPO_ROOT)
     parser.add_argument("--skip-run", action="store_true")
     parser.add_argument("--skip-evo", action="store_true")
+    parser.add_argument("--skip-replay", action="store_true")
     parser.add_argument("--skip-summary", action="store_true")
-    return parser.parse_args()
+    parser.add_argument(
+        "--launch-arg",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Override one launch argument and record the effective value in the summary.",
+    )
+    parser.add_argument(
+        "--stop-after-processed-frames",
+        type=int,
+        default=None,
+        help="Request a bounded diagnostic slice instead of the metadata image count.",
+    )
+    parser.add_argument(
+        "--allow-failures",
+        action="store_true",
+        help="Write reports but return zero for diagnostic matrix runs.",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    contract = load_acceptance_contract()
+    results_root = args.results_root.resolve()
+    results_root.mkdir(parents=True, exist_ok=True)
+    (results_root / "run_logs").mkdir(parents=True, exist_ok=True)
     selected_cases = (
         list(CASE_CONFIGS)
         if args.case == "all"
         else [args.case]
     )
-    summaries = [run_case(case_name, args) for case_name in selected_cases]
+    summaries = [run_case(case_name, args, contract) for case_name in selected_cases]
+    replay = (
+        {"ok": False, "skipped": True, "reason": "skip-replay requested"}
+        if args.skip_replay
+        else run_replay_comparison(
+            repo_root=args.repo_root.resolve(),
+            workspace_root=args.workspace_root.resolve(),
+            results_root=results_root,
+            contract=contract,
+        )
+    )
+    report = build_overall_report(
+        contract_path=str(DEFAULT_ACCEPTANCE_CONTRACT),
+        summaries=summaries,
+        replay=replay,
+        required_case_fields=contract["report"]["required_case_fields"],
+        required_overall_fields=contract["report"]["required_overall_fields"],
+    )
+    report_path = results_root / "m6_report.json"
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     if not args.skip_summary:
-        print(json.dumps(summaries, indent=2, sort_keys=True))
-    return 0
+        print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] or args.allow_failures else 1
 
 
 if __name__ == "__main__":

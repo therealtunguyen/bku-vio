@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "euroc_v101_easy": {
+    "runtime": {
+      "timed_out": false,
+      "worker_crashes": 0,
+      "image_queue_full": 0,
+      "large_forward_gap_skips": 0,
+      "large_image_timestamp_gaps": 0,
+      "imu_init_resets": 0,
+      "minimum_odometry_poses": 2800
+    },
+    "metrics": {
+      "ape_translation_rmse_m_max": 1.0,
+      "baseline_regression_warning_rmse_m_max": 0.25,
+      "require_rpe_translation_rmse": true,
+      "alignment": "se3",
+      "scale_correction": false
+    },
+    "replay": {
+      "minimum_processed_frames": 400,
+      "discontinuities": 0,
+      "segment_replay_matches": true
+    }
+  },
+  "hcmut_d455_smoke": {
+    "runtime": {
+      "timed_out": false,
+      "worker_crashes": 0,
+      "image_queue_full": 0,
+      "large_image_timestamp_gaps": 0,
+      "frame_gap_resets": 0,
+      "imu_init_resets": 0,
+      "minimum_accepted_updates": 1
+    },
+    "replay": {
+      "minimum_processed_frames": 260,
+      "discontinuities": 0,
+      "segment_replay_matches": true,
+      "require_onset_report": true,
+      "require_classification": true,
+      "accuracy_gate": false
+    }
+  },
+  "report": {
+    "required_case_fields": [
+      "case",
+      "config",
+      "run",
+      "runtime_health",
+      "checks",
+      "ok",
+      "summary_path"
+    ],
+    "required_overall_fields": [
+      "schema_version",
+      "generated_at_utc",
+      "contract_path",
+      "cases",
+      "replay",
+      "checks",
+      "ok"
+    ]
+  },
+  "rpi5_gate": {
+    "require_workstation_overall_ok": true,
+    "require_hcmut_investigation_classified": true,
+    "require_container_build": true,
+    "require_regression_suite": true
+  }
+}

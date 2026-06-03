@@ -17,11 +17,9 @@
 - Baseline EuRoC full-run đã xác nhận trước đó vẫn được giữ làm mốc đối chiếu:
   ATE RMSE `0.134976 m`, `2891` odometry poses, không có queue-drop warnings,
   và không có worker crashes.
-- Tuy nhiên, runner M6 hiện tại chưa khép lại full-run EuRoC ở trạng thái
-  acceptance-ready. Profile automation bảo thủ mới nhất đã được hạ còn
-  `bag_rate=0.15` và `image_processing_width=640`; slice xác minh ngắn chạy
-  ổn định, nhưng full scripted run vẫn có thể phát sinh `Image queue full` và
-  `Skipping visual update after large forward image gap`.
+- Runner M6 hiện đã khép lại full-run EuRoC trên workstation bằng profile
+  `bag_rate=0.10` và `image_processing_width=640`. Authoritative report ghi
+  nhận `0` queue overflows và `0` large-forward-gap skips cho EuRoC.
 - Project scope hiện là pure VIO/MSCKF; không còn nhánh ArUco trong kế hoạch.
 - Launch mặc định vẫn chạy EuRoC với calibration EuRoC:
   - Intrinsics/distortion mặc định nằm trong `backend/msckf_updater.py`.
@@ -32,6 +30,12 @@
   Extrinsics thật của thiết bị đã có trong `tf_static_extrinsics.txt`; phần còn
   thiếu để coi đây là evaluation path chính thức là khóa M6 metrics/baselines,
   không phải đi tìm extrinsics nữa.
+
+M6 pass/fail is defined by
+[`ros_ws/src/vio_pkg/M6_ACCEPTANCE.md`](ros_ws/src/vio_pkg/M6_ACCEPTANCE.md)
+and its machine-readable source of truth, `tools/m6_acceptance.json`.
+Narrative status notes must not override the latest authoritative
+`m6_report.json`.
 
 ## 1. Yêu cầu
 
@@ -226,9 +230,36 @@ t = [0.028793809935, 0.007352355558, 0.015779949041]
 
 Milestone status hiện tại:
 - M5 pure-VIO hardening: hoàn tất theo scope local docs
-- M6: đã bắt đầu phần evaluation scaffolding (`tools/run_m6_eval.py`, replay
-  harness HCMUT/EuRoC), nhưng chưa khóa full-run EuRoC automation path,
-  chưa khóa systematic metrics/reporting, và chưa bắt đầu nhánh RPi 5
+- M6 workstation evaluation gate passed using the authoritative report at
+  `/home/ubuntu/VIO/results/m6_workstation_acceptance/m6_report.json`.
+  Raspberry Pi 5 verification may begin. Target-hardware verification is still
+  open until the matrix in `ros_ws/src/vio_pkg/RPI5_VERIFICATION.md` is
+  executed on the device.
+- Promoted EuRoC runner profile:
+  - `bag_rate=0.10`
+  - `image_processing_width=640`
+- Accepted EuRoC facts from the report:
+  - `odometry_poses=2891`
+  - `ape_translation_rmse_m=0.1419649963884283`
+  - `rpe_translation_1m_rmse_m=0.0954034326110991`
+  - `image_queue_full=0`
+  - `large_forward_gap_skips=0`
+- HCMUT smoke facts from the same report:
+  - `smoke_check.ok=true`
+  - `accepted_updates=3`
+  - `frame_gap_resets=0`
+  - `image_queue_full=0`
+  - `runtime_health.large_forward_gap_skips=7`
+  - HCMUT vẫn chỉ là smoke và replay-debug path, không phải metric benchmark
+- HCMUT frame-181 replay classification:
+  - `propagation_side`
+  - next fix target is IMU propagation/static initialization, not MSCKF update
+
+Raspberry Pi 5 verification starts only after the workstation M6 gate passes.
+Use
+[`ros_ws/src/vio_pkg/RPI5_VERIFICATION.md`](ros_ws/src/vio_pkg/RPI5_VERIFICATION.md)
+for the target-hardware matrix and evidence requirements. This does not claim
+deployment completion.
 
 Có thể dùng launch preset:
 

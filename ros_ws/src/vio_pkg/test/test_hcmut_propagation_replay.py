@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import os
 import sqlite3
 import sys
@@ -167,6 +168,196 @@ def test_print_summary_reports_first_divergence(capsys):
     ) in captured.out
 
 
+def test_build_onset_window_diagnostics_flags_pre_update_divergence():
+    metrics = [
+        FrameMetric(
+            processed_frame=180,
+            raw_image_index=200,
+            header_time=18.0,
+            vel_norm=0.124058,
+            imu_count=6,
+            imu_large_dt_skips=0,
+            discontinuity_count=0,
+            gyro_mean_norm=0.02,
+            accel_mean_norm=9.81,
+            world_acc_mean_norm=0.03,
+            active_tracks=0,
+            mature_features=0,
+            msckf_accepted=0,
+        ),
+        FrameMetric(
+            processed_frame=181,
+            raw_image_index=201,
+            header_time=18.1,
+            vel_norm=0.177831,
+            imu_count=6,
+            imu_large_dt_skips=0,
+            discontinuity_count=0,
+            gyro_mean_norm=0.03,
+            accel_mean_norm=9.80,
+            world_acc_mean_norm=0.05,
+            active_tracks=0,
+            mature_features=0,
+            msckf_accepted=0,
+        ),
+    ]
+
+    diag = build_onset_window_diagnostics(
+        metrics,
+        start_frame=160,
+        stop_frame=200,
+        vel_norm_limit=0.15,
+    )
+
+    assert diag["first_divergence_frame"] == 181
+    assert diag["first_divergence_raw_image"] == 201
+    assert diag["visual_update_absent_before_onset"] is True
+    assert diag["classification_hint"] == "propagation_side"
+
+
+def test_build_onset_window_diagnostics_counts_visual_activity_before_onset():
+    metrics = [
+        FrameMetric(
+            170,
+            190,
+            17.0,
+            0.10,
+            6,
+            0,
+            0,
+            0.02,
+            9.81,
+            0.03,
+            active_tracks=12,
+            mature_features=4,
+            msckf_accepted=1,
+        ),
+        FrameMetric(
+            181,
+            201,
+            18.1,
+            0.18,
+            6,
+            0,
+            0,
+            0.03,
+            9.80,
+            0.05,
+            active_tracks=10,
+            mature_features=3,
+            msckf_accepted=1,
+        ),
+    ]
+
+    diag = build_onset_window_diagnostics(
+        metrics,
+        start_frame=160,
+        stop_frame=200,
+        vel_norm_limit=0.15,
+    )
+
+    assert diag["visual_update_absent_before_onset"] is False
+    assert diag["classification_hint"] == "mixed_or_visual_side"
+
+
+def test_build_onset_window_diagnostics_includes_state_rows():
+    metric = FrameMetric(
+        processed_frame=181,
+        raw_image_index=201,
+        header_time=18.1,
+        vel_norm=0.177831,
+        imu_count=6,
+        imu_large_dt_skips=0,
+        discontinuity_count=0,
+        gyro_mean_norm=0.03,
+        accel_mean_norm=9.80,
+        world_acc_mean_norm=0.05,
+        active_tracks=10,
+        mature_features=3,
+        msckf_accepted=0,
+        clone_count=20,
+        p_pos_trace=1.0,
+        p_vel_trace=2.0,
+        p_bg_trace=3.0,
+        p_ba_trace=4.0,
+        accel_bias_norm=0.12,
+        gyro_bias_norm=0.03,
+    )
+
+    diag = build_onset_window_diagnostics(
+        [metric],
+        start_frame=181,
+        stop_frame=181,
+        vel_norm_limit=0.15,
+    )
+
+    assert diag["rows"] == [
+        {
+            "processed_frame": 181,
+            "raw_image_index": 201,
+            "vel_norm": 0.177831,
+            "world_acc_mean_norm": 0.05,
+            "active_tracks": 10,
+            "mature_features": 3,
+            "msckf_accepted": 0,
+            "clone_count": 20,
+            "p_pos_trace": 1.0,
+            "p_vel_trace": 2.0,
+            "p_bg_trace": 3.0,
+            "p_ba_trace": 4.0,
+            "accel_bias_norm": 0.12,
+            "gyro_bias_norm": 0.03,
+        }
+    ]
+
+
+def test_onset_window_classify_onset_comparison_prefers_propagation_side_when_it_crosses_first():
+    result = classify_onset_comparison(
+        propagation={"first_divergence_frame": 181},
+        msckf={"first_divergence_frame": 181, "pre_onset_visual_updates": 0},
+    )
+
+    assert result == {
+        "classification": "propagation_side",
+        "exact_next_fix_target": (
+            "Inspect gravity-compensated IMU state evolution in backend/propagator.py "
+            "and static initialization before changing MSCKF update logic."
+        ),
+    }
+
+
+def test_write_onset_window_json_report_schema(tmp_path):
+    output_path = tmp_path / "onset_window_report.json"
+    hcmut = {
+        "first_divergence_frame": 181,
+        "first_divergence_raw_image": 201,
+        "first_divergence_vel_norm": 0.177831,
+        "visual_update_absent_before_onset": True,
+        "classification_hint": "propagation_side",
+    }
+    euroc = {
+        "first_divergence_frame": -1,
+        "first_divergence_raw_image": -1,
+        "first_divergence_vel_norm": 0.0,
+        "visual_update_absent_before_onset": True,
+        "classification_hint": "no_divergence",
+    }
+
+    write_onset_window_json_report(
+        output_path,
+        hcmut=hcmut,
+        euroc=euroc,
+        window_start=160,
+        window_stop=220,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["window"]["start_frame"] == 160
+    assert payload["window"]["stop_frame"] == 220
+    assert payload["hcmut"] == hcmut
+    assert payload["euroc"] == euroc
+
+
 @dataclass(frozen=True)
 class ReplayEvent:
     header_time: float
@@ -219,6 +410,8 @@ class FrameMetric:
     p_vel_trace: float = 0.0
     p_bg_trace: float = 0.0
     p_ba_trace: float = 0.0
+    accel_bias_norm: float = 0.0
+    gyro_bias_norm: float = 0.0
 
 
 @dataclass
@@ -418,6 +611,8 @@ class PropagationReplay:
         with self.state_server.lock:
             vel_norm = float(np.linalg.norm(self.state_server.state.velocity))
             clone_count = len(self.state_server.state.clone_poses)
+            accel_bias_norm = float(np.linalg.norm(self.state_server.state.accel_bias))
+            gyro_bias_norm = float(np.linalg.norm(self.state_server.state.gyro_bias))
 
         imu_span_s = 0.0
         if imu_measurements:
@@ -436,6 +631,8 @@ class PropagationReplay:
             world_acc_mean_norm=world_acc_mean_norm,
             imu_span_s=imu_span_s,
             clone_count=clone_count,
+            accel_bias_norm=accel_bias_norm,
+            gyro_bias_norm=gyro_bias_norm,
         )
 
 
@@ -676,6 +873,8 @@ class MsckfReplay(PropagationReplay):
                     p_ba_trace = float(np.trace(self.state_server.covariance[12:15, 12:15]))
                 except (IndexError, ValueError):
                     pass
+            accel_bias_norm = float(np.linalg.norm(state.accel_bias))
+            gyro_bias_norm = float(np.linalg.norm(state.gyro_bias))
         
         triangulation_summary = _summarize_triangulation_diagnostics(
             triangulation_diagnostics
@@ -750,6 +949,8 @@ class MsckfReplay(PropagationReplay):
             p_vel_trace=p_vel_trace,
             p_bg_trace=p_bg_trace,
             p_ba_trace=p_ba_trace,
+            accel_bias_norm=accel_bias_norm,
+            gyro_bias_norm=gyro_bias_norm,
         )
 
     def _apply_effective_camera_calibration(self, *, scale: float) -> None:
@@ -916,6 +1117,128 @@ def find_first_divergence_frame(
                 "vel_norm": metric.vel_norm,
             }
     return None
+
+
+def build_onset_window_diagnostics(
+    metrics: list[FrameMetric],
+    *,
+    start_frame: int,
+    stop_frame: int,
+    vel_norm_limit: float,
+) -> dict[str, object]:
+    window = [
+        metric
+        for metric in metrics
+        if start_frame <= metric.processed_frame <= stop_frame
+    ]
+    rows = [
+        {
+            "processed_frame": int(metric.processed_frame),
+            "raw_image_index": int(metric.raw_image_index),
+            "vel_norm": float(metric.vel_norm),
+            "world_acc_mean_norm": float(metric.world_acc_mean_norm),
+            "active_tracks": int(metric.active_tracks),
+            "mature_features": int(metric.mature_features),
+            "msckf_accepted": int(metric.msckf_accepted),
+            "clone_count": int(metric.clone_count),
+            "p_pos_trace": float(metric.p_pos_trace),
+            "p_vel_trace": float(metric.p_vel_trace),
+            "p_bg_trace": float(metric.p_bg_trace),
+            "p_ba_trace": float(metric.p_ba_trace),
+            "accel_bias_norm": float(metric.accel_bias_norm),
+            "gyro_bias_norm": float(metric.gyro_bias_norm),
+        }
+        for metric in window
+    ]
+    first_divergence = find_first_divergence_frame(window, vel_norm_limit)
+    if first_divergence is None:
+        return {
+            "first_divergence_frame": -1,
+            "first_divergence_raw_image": -1,
+            "first_divergence_vel_norm": 0.0,
+            "visual_update_absent_before_onset": True,
+            "classification_hint": "no_divergence",
+            "rows": rows,
+        }
+
+    onset_frame = int(first_divergence["processed_frame"])
+    pre_onset = [metric for metric in window if metric.processed_frame < onset_frame]
+    pre_onset_visual_updates = sum(metric.msckf_accepted for metric in pre_onset)
+    pre_onset_mature = sum(metric.mature_features for metric in pre_onset)
+    pre_onset_tracks = max((metric.active_tracks for metric in pre_onset), default=0)
+    visual_update_absent = (
+        pre_onset_visual_updates == 0
+        and pre_onset_mature == 0
+        and pre_onset_tracks == 0
+    )
+
+    return {
+        "first_divergence_frame": onset_frame,
+        "first_divergence_raw_image": int(first_divergence["raw_image_index"]),
+        "first_divergence_vel_norm": float(first_divergence["vel_norm"]),
+        "pre_onset_visual_updates": int(pre_onset_visual_updates),
+        "pre_onset_mature_features": int(pre_onset_mature),
+        "pre_onset_peak_active_tracks": int(pre_onset_tracks),
+        "visual_update_absent_before_onset": bool(visual_update_absent),
+        "classification_hint": (
+            "propagation_side" if visual_update_absent else "mixed_or_visual_side"
+        ),
+        "rows": rows,
+    }
+
+
+def classify_onset_comparison(
+    *,
+    propagation: dict[str, float | int | bool | str],
+    msckf: dict[str, float | int | bool | str],
+) -> dict[str, str]:
+    propagation_frame = int(propagation.get("first_divergence_frame", -1))
+    msckf_frame = int(msckf.get("first_divergence_frame", -1))
+    accepted_updates = int(msckf.get("pre_onset_visual_updates", 0))
+
+    if propagation_frame >= 0 and (msckf_frame < 0 or propagation_frame <= msckf_frame):
+        return {
+            "classification": "propagation_side",
+            "exact_next_fix_target": (
+                "Inspect gravity-compensated IMU state evolution in backend/propagator.py "
+                "and static initialization before changing MSCKF update logic."
+            ),
+        }
+    if propagation_frame < 0 and msckf_frame >= 0 and accepted_updates > 0:
+        return {
+            "classification": "visual_update_side",
+            "exact_next_fix_target": (
+                "Inspect accepted MSCKF batches before the onset in "
+                "backend/msckf_updater.py."
+            ),
+        }
+    return {
+        "classification": "mixed_state_visual_interaction",
+        "exact_next_fix_target": (
+            "Inspect frontend mature-track turnover and pre-update propagated state "
+            "together across frames 170-190."
+        ),
+    }
+
+
+def write_onset_window_json_report(
+    path,
+    hcmut,
+    euroc,
+    window_start,
+    window_stop,
+) -> None:
+    report = {
+        "window": {
+            "start_frame": int(window_start),
+            "stop_frame": int(window_stop),
+        },
+        "hcmut": dict(hcmut),
+        "euroc": dict(euroc),
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 def _summarize_triangulation_diagnostics(

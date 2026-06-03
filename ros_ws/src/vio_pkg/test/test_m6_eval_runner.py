@@ -9,6 +9,7 @@ environment.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -62,12 +63,13 @@ def test_get_case_config_uses_conservative_euroc_automation_profile():
     case_config = module.get_case_config("euroc_v101_easy")
     launch_args = dict(case_config["static_launch_args"])
 
-    assert launch_args["bag_rate"] == "0.15"
+    assert launch_args["bag_rate"] == "0.10"
     assert launch_args["enable_rviz"] == "false"
     assert launch_args["publish_debug_image"] == "false"
     assert launch_args["image_processing_width"] == "640"
     assert launch_args["log_tracked_frames"] == "false"
-    assert "runtime_diagnostics_enabled" not in launch_args
+    assert launch_args["runtime_diagnostics_enabled"] == "true"
+    assert launch_args["diagnostics_log_every_n_frames"] == "10"
 
 
 def test_read_expected_message_count_reads_synthetic_rosbag2_metadata(tmp_path):
@@ -137,6 +139,42 @@ def test_extract_runtime_diagnostics_parses_queue_counts_and_timings():
     assert diagnostics["gyro_bias_norm"] == pytest.approx(0.002)
 
 
+def test_extract_runtime_health_reports_queue_overflow_and_first_nonrecoverable_sample():
+    module = load_run_m6_eval_module()
+    log_text = """
+[INFO] Runtime diagnostics: frame=300, queue=3/50, received=304, enqueued=304, dropped=0, total=120.0ms
+[INFO] Runtime diagnostics: frame=310, queue=49/50, received=360, enqueued=360, dropped=0, total=740.0ms
+[WARN] Image queue full. Dropped stale frame.
+[WARN] Skipping visual update after large forward image gap: dt_img=0.1000s
+[INFO] Runtime diagnostics: frame=320, queue=50/50, received=422, enqueued=422, dropped=2, total=910.0ms
+""".strip()
+
+    health = module.extract_runtime_health(log_text)
+
+    assert health["ok"] is False
+    assert health["image_queue_full"] == 1
+    assert health["large_forward_gap_skips"] == 1
+    assert health["peak_queue_size"] == 50
+    assert health["peak_queue_capacity"] == 50
+    assert health["latest_dropped"] == 2
+    assert health["first_nonrecoverable_queue_frame"] == 310
+    assert health["first_nonrecoverable_queue_size"] == 49
+
+
+def test_extract_runtime_health_accepts_clean_diagnostic_log():
+    module = load_run_m6_eval_module()
+    log_text = """
+[INFO] Runtime diagnostics: frame=300, queue=3/50, received=304, enqueued=304, dropped=0, total=120.0ms
+[INFO] Runtime diagnostics: frame=310, queue=1/50, received=314, enqueued=314, dropped=0, total=140.0ms
+""".strip()
+
+    health = module.extract_runtime_health(log_text)
+
+    assert health["ok"] is True
+    assert health["runtime_sample_count"] == 2
+    assert health["first_nonrecoverable_queue_frame"] == -1
+
+
 def test_extract_evo_metrics_parses_representative_evo_ape_output():
     module = load_run_m6_eval_module()
     output_text = """
@@ -161,6 +199,296 @@ APE w.r.t. translation part (m)
     assert metrics["min"] == pytest.approx(0.012004)
     assert metrics["max"] == pytest.approx(0.168742)
     assert metrics["sse"] == pytest.approx(1.978654)
+
+
+def test_apply_launch_arg_overrides_replaces_existing_values_and_appends_new_values():
+    module = load_run_m6_eval_module()
+    case = module.get_case_config("euroc_v101_easy")
+
+    updated = module.apply_launch_arg_overrides(
+        case,
+        ("bag_rate=0.10", "image_processing_width=480", "diagnostics_log_every_n_frames=1"),
+    )
+
+    launch_args = dict(updated["static_launch_args"])
+    assert launch_args["bag_rate"] == "0.10"
+    assert launch_args["image_processing_width"] == "480"
+    assert launch_args["diagnostics_log_every_n_frames"] == "1"
+
+
+def test_apply_launch_arg_overrides_rejects_malformed_value():
+    module = load_run_m6_eval_module()
+
+    with pytest.raises(ValueError, match="NAME=VALUE"):
+        module.apply_launch_arg_overrides(
+            module.get_case_config("euroc_v101_easy"),
+            ("bag_rate",),
+        )
+
+
+def test_requested_frame_limit_defaults_to_metadata_count_and_accepts_positive_override():
+    module = load_run_m6_eval_module()
+
+    assert module.resolve_requested_frames(None, expected_frames=2912) == 2912
+    assert module.resolve_requested_frames(300, expected_frames=2912) == 300
+
+    with pytest.raises(ValueError, match="positive"):
+        module.resolve_requested_frames(0, expected_frames=2912)
+
+
+def test_evaluate_euroc_case_requires_clean_runtime_pose_count_and_ape():
+    module = load_run_m6_eval_module()
+    contract = {
+        "runtime": {
+            "timed_out": False,
+            "worker_crashes": 0,
+            "image_queue_full": 0,
+            "large_forward_gap_skips": 0,
+            "large_image_timestamp_gaps": 0,
+            "imu_init_resets": 0,
+            "minimum_odometry_poses": 2800,
+        },
+        "metrics": {
+            "ape_translation_rmse_m_max": 1.0,
+            "require_rpe_translation_rmse": True,
+            "alignment": "se3",
+            "scale_correction": False,
+        },
+    }
+    summary = {
+        "run": {"timed_out": False},
+        "runtime_health": {
+            "worker_crashes": 0,
+            "image_queue_full": 0,
+            "large_forward_gap_skips": 0,
+            "large_image_timestamp_gaps": 0,
+            "imu_init_resets": 0,
+        },
+        "evo": {
+            "returncode": 0,
+            "evaluation_summary": {
+                "odometry_poses": 2891,
+                "evo": {
+                    "ape_translation": {
+                        "rmse": 0.134976,
+                        "alignment": "se3",
+                        "scale_correction": False,
+                    },
+                    "rpe_translation_1m": {"rmse": 0.022},
+                },
+            },
+        },
+    }
+
+    checks = module.evaluate_euroc_case(summary, contract)
+
+    assert all(checks.values())
+
+
+def test_evaluate_hcmut_case_requires_clean_runtime_and_accepted_update():
+    module = load_run_m6_eval_module()
+    contract = {
+        "runtime": {
+            "timed_out": False,
+            "worker_crashes": 0,
+            "image_queue_full": 0,
+            "large_image_timestamp_gaps": 0,
+            "frame_gap_resets": 0,
+            "imu_init_resets": 0,
+            "minimum_accepted_updates": 1,
+        }
+    }
+    summary = {
+        "run": {"timed_out": False},
+        "runtime_health": {
+            "worker_crashes": 0,
+            "image_queue_full": 0,
+            "large_image_timestamp_gaps": 0,
+            "frame_gap_resets": 0,
+            "imu_init_resets": 0,
+        },
+        "smoke_check": {
+            "accepted_updates": 2,
+        },
+    }
+
+    checks = module.evaluate_hcmut_case(summary, contract)
+
+    assert all(checks.values())
+
+
+def test_build_overall_report_is_red_when_any_case_is_red():
+    module = load_run_m6_eval_module()
+
+    report = module.build_overall_report(
+        contract_path="tools/m6_acceptance.json",
+        summaries=[{"case": "euroc_v101_easy", "ok": False}],
+        replay={"ok": True},
+        required_case_fields=("case", "ok"),
+        required_overall_fields=("schema_version", "checks"),
+    )
+
+    assert report["ok"] is False
+
+
+def test_evaluate_replay_report_requires_deterministic_rows_and_classification():
+    module = load_run_m6_eval_module()
+    contract = {
+        "euroc_v101_easy": {
+            "replay": {
+                "minimum_processed_frames": 400,
+                "discontinuities": 0,
+                "segment_replay_matches": True,
+            },
+        },
+        "hcmut_d455_smoke": {
+            "replay": {
+                "minimum_processed_frames": 260,
+                "discontinuities": 0,
+                "segment_replay_matches": True,
+                "require_onset_report": True,
+                "require_classification": True,
+            },
+        },
+    }
+    payload = {
+        "euroc": {
+            "msckf": {
+                "processed_frames": 400,
+                "discontinuities": 0,
+                "segment_replay_matches": True,
+            },
+        },
+        "hcmut": {
+            "msckf": {
+                "processed_frames": 260,
+                "discontinuities": 0,
+                "segment_replay_matches": True,
+            },
+        },
+        "investigation": {"classification": "propagation_side"},
+    }
+
+    checks = module.evaluate_replay_report(payload, contract)
+
+    assert all(checks.values())
+
+
+def test_run_replay_comparison_reads_payload_and_evaluates_checks(tmp_path, monkeypatch):
+    module = load_run_m6_eval_module()
+    results_root = tmp_path / "results"
+    (results_root / "run_logs").mkdir(parents=True)
+    contract = {
+        "euroc_v101_easy": {
+            "replay": {
+                "minimum_processed_frames": 10,
+                "discontinuities": 0,
+                "segment_replay_matches": True,
+            },
+        },
+        "hcmut_d455_smoke": {
+            "replay": {
+                "minimum_processed_frames": 10,
+                "discontinuities": 0,
+                "segment_replay_matches": True,
+                "require_onset_report": True,
+                "require_classification": True,
+            },
+        },
+    }
+
+    def fake_run(command, log_path, workspace_root, repo_root):
+        payload = {
+            "euroc": {
+                "msckf": {
+                    "processed_frames": 10,
+                    "discontinuities": 0,
+                    "segment_replay_matches": True,
+                }
+            },
+            "hcmut": {
+                "msckf": {
+                    "processed_frames": 10,
+                    "discontinuities": 0,
+                    "segment_replay_matches": True,
+                }
+            },
+            "investigation": {"classification": "mixed_or_visual_side"},
+        }
+        output_index = command.index("--output") + 1
+        Path(command[output_index]).write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+        return module.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module, "_run_logged_command", fake_run)
+
+    replay = module.run_replay_comparison(
+        repo_root=tmp_path,
+        workspace_root=tmp_path,
+        results_root=results_root,
+        contract=contract,
+    )
+
+    assert replay["ok"] is True
+    assert replay["checks"]["hcmut_classification"] is True
+    assert Path(replay["report_path"]).is_file()
+
+
+def test_load_acceptance_contract_falls_back_to_builtin_when_file_is_missing(tmp_path):
+    module = load_run_m6_eval_module()
+
+    contract = module.load_acceptance_contract(tmp_path / "missing.json")
+
+    assert contract["schema_version"] == 1
+    assert "euroc_v101_easy" in contract
+
+
+def test_main_returns_zero_when_allow_failures_is_set(tmp_path, monkeypatch):
+    module = load_run_m6_eval_module()
+    results_root = tmp_path / "results"
+    contract = {
+        "schema_version": 1,
+        "report": {
+            "required_case_fields": ["case", "ok"],
+            "required_overall_fields": [
+                "schema_version",
+                "generated_at_utc",
+                "contract_path",
+                "cases",
+                "replay",
+                "checks",
+                "ok",
+            ],
+        },
+    }
+
+    def fake_run_case(case_name, args, contract_data):
+        return {"case": case_name, "ok": False, "summary_path": str(results_root / "case.json")}
+
+    monkeypatch.setattr(module, "load_acceptance_contract", lambda path=None: contract)
+    monkeypatch.setattr(module, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        module,
+        "run_replay_comparison",
+        lambda **kwargs: {"ok": False, "checks": {}},
+    )
+
+    exit_code = module.main(
+        [
+            "--case",
+            "euroc_v101_easy",
+            "--results-root",
+            str(results_root),
+            "--allow-failures",
+            "--skip-replay",
+            "--skip-summary",
+        ]
+    )
+
+    assert exit_code == 0
+    assert (results_root / "m6_report.json").is_file()
 
 
 def test_check_hcmut_smoke_log_accepts_clean_smoke_run():
